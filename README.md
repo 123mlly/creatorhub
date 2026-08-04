@@ -185,6 +185,24 @@ npm install
 - 需要 [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/)（Win10/11 多数已带）
 - 未签名时 SmartScreen 可能提示「仍要运行」
 
+可选 **Authenticode 代码签名**（需先购买代码签名证书，并安装含 `signtool` 的 Windows SDK）。在打包前设置环境变量，脚本会在打 zip 前签名 `CreatorHub.exe`：
+
+```powershell
+# 方式一：PFX 文件
+$env:CODESIGN_PFX = "C:\path\to\cert.pfx"
+$env:CODESIGN_PASSWORD = "证书密码"   # 无密码可省略
+
+# 方式二：本机证书存储 / EV 令牌（按证书主题名）
+$env:CODESIGN_SUBJECT = "Your Company Name"
+
+# 可选：时间戳服务（默认 DigiCert）
+# $env:CODESIGN_TIMESTAMP_URL = "http://timestamp.digicert.com"
+
+.\packaging\build_windows.ps1
+```
+
+未设置上述变量时跳过签名，行为与以前相同。
+
 ## 基本使用
 
 ### 添加账号

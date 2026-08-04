@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
   在 Windows 上构建 CreatorHub 桌面版（PyInstaller onedir + zip）。
@@ -8,6 +8,15 @@
 
   用法（PowerShell，仓库根目录）:
     .\packaging\build_windows.ps1
+
+  可选 Authenticode 签名（设置任一方式即可）:
+    # PFX 文件
+    $env:CODESIGN_PFX = "C:\path\to\cert.pfx"
+    $env:CODESIGN_PASSWORD = "证书密码"   # 无密码可省略
+    # 或证书存储 / EV 令牌（按主题名）
+    $env:CODESIGN_SUBJECT = "Your Company Name"
+    # 可选时间戳服务（默认 DigiCert）
+    $env:CODESIGN_TIMESTAMP_URL = "http://timestamp.digicert.com"
 
   产物:
     dist\CreatorHub\CreatorHub.exe
@@ -20,6 +29,70 @@ $ErrorActionPreference = "Stop"
 
 function Write-Log([string]$Message) {
     Write-Host "[build] $Message"
+}
+
+function Find-SignTool {
+    $cmd = Get-Command signtool.exe -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
+
+    $roots = @(
+        "${env:ProgramFiles(x86)}\Windows Kits\10\bin",
+        "${env:ProgramFiles}\Windows Kits\10\bin"
+    ) | Where-Object { $_ -and (Test-Path $_) }
+
+    foreach ($root in $roots) {
+        $found = Get-ChildItem -Path $root -Recurse -Filter "signtool.exe" -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match '\\x64\\signtool\.exe$' } |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+        if ($found) { return $found.FullName }
+    }
+    return $null
+}
+
+function Invoke-CodeSign([string]$TargetExe) {
+    $pfx = $env:CODESIGN_PFX
+    $subject = $env:CODESIGN_SUBJECT
+    $password = $env:CODESIGN_PASSWORD
+    $timestamp = $env:CODESIGN_TIMESTAMP_URL
+    if (-not $timestamp) { $timestamp = "http://timestamp.digicert.com" }
+
+    if (-not $pfx -and -not $subject) {
+        Write-Log "未设置 CODESIGN_PFX / CODESIGN_SUBJECT，跳过代码签名。"
+        return $false
+    }
+
+    $signtool = Find-SignTool
+    if (-not $signtool) {
+        throw "需要签名但未找到 signtool.exe。请安装 Windows SDK（含 Signing Tools）。"
+    }
+    Write-Log "使用 signtool: $signtool"
+
+    $args = @(
+        "sign",
+        "/fd", "sha256",
+        "/td", "sha256",
+        "/tr", $timestamp
+    )
+    if ($pfx) {
+        if (-not (Test-Path $pfx)) { throw "CODESIGN_PFX 不存在: $pfx" }
+        Write-Log "Authenticode 签名（PFX）…"
+        $args += @("/f", $pfx)
+        if ($password) { $args += @("/p", $password) }
+    } else {
+        Write-Log "Authenticode 签名（证书主题: $subject）…"
+        $args += @("/n", $subject)
+    }
+    $args += $TargetExe
+
+    & $signtool @args
+    if ($LASTEXITCODE -ne 0) { throw "signtool sign 失败 (exit $LASTEXITCODE)" }
+
+    & $signtool verify /pa $TargetExe
+    if ($LASTEXITCODE -ne 0) { throw "signtool verify 失败 (exit $LASTEXITCODE)" }
+
+    Write-Log "代码签名完成。"
+    return $true
 }
 
 if ($env:OS -ne "Windows_NT") {
@@ -116,6 +189,8 @@ if (-not (Test-Path $ExePath)) {
     exit 1
 }
 
+$signed = Invoke-CodeSign $ExePath
+
 Write-Log "制作 zip…"
 if (Test-Path $ZipPath) { Remove-Item -Force $ZipPath }
 Compress-Archive -Path $OutDir -DestinationPath $ZipPath -Force
@@ -123,6 +198,10 @@ Compress-Archive -Path $OutDir -DestinationPath $ZipPath -Force
 Write-Log "完成:"
 Write-Log "  App: $ExePath"
 Write-Log "  Zip: $ZipPath"
-Write-Log "首次运行若被 SmartScreen 拦截: 更多信息 → 仍要运行（未代码签名时常见）。"
+if ($signed) {
+    Write-Log "已 Authenticode 签名。"
+} else {
+    Write-Log "首次运行若被 SmartScreen 拦截: 更多信息 → 仍要运行（未代码签名时常见）。"
+}
 Write-Log "用户数据目录: %APPDATA%\CreatorHub\"
 Write-Log "需要 WebView2 Runtime；若窗口打不开请安装: https://developer.microsoft.com/microsoft-edge/webview2/"

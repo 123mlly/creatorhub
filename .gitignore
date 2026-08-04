@@ -49,5 +49,11 @@ dist/
 packaging/ms-playwright/
 packaging/icons/CreatorHub.iconset/
 
+# 代码签名证书（勿入库）
+*.pfx
+*.p12
+*.pem
+!*.example.pem
+
 # 内部方案文档(不随公开仓库发布)
 docs/
