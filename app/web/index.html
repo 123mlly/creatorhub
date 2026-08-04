@@ -2,12 +2,9 @@
 <html lang="zh">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>CreatorHub</title>
-<!-- 数据看板字体:Fira Sans(正文拉丁)+ Fira Code(数字/等宽);离线时自动回退系统字体 -->
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600&family=Fira+Sans:wght@300;400;500;600;700&display=swap">
+<!-- 关键内联 CSS,避免 Google Fonts 阻塞首屏(打包/弱网时会白屏很久) -->
 <style>
   :root {
     /* surfaces */
@@ -34,8 +31,9 @@
   }
   * { box-sizing:border-box; }
   html { scroll-behavior:smooth; }
+  html, body { max-width:100%; overflow-x:hidden; overflow-x:clip; }
   body {
-    margin:0; min-height:100vh;
+    margin:0; min-height:100vh; min-height:100dvh;
     font:14px/1.6 var(--sans);
     color:var(--fg);
     background:
@@ -43,6 +41,7 @@
       radial-gradient(900px 500px at 0% 0%, rgba(56,189,248,.05), transparent 55%),
       var(--bg);
     -webkit-font-smoothing:antialiased;
+    padding-left:env(safe-area-inset-left); padding-right:env(safe-area-inset-right);
   }
   ::selection { background:var(--acc-soft); }
 
@@ -94,6 +93,7 @@
   .pswitch button.active[data-pf="xhs"] { background:var(--xhs-soft); color:var(--xhs); border-color:var(--xhs-ring); }
   .pswitch button.active[data-pf="kuaishou"] { background:rgba(255,121,2,.16); color:#ff7902; border-color:rgba(255,121,2,.4); }
   .pswitch button.active[data-pf="shipinhao"] { background:rgba(7,193,96,.16); color:#07c160; border-color:rgba(7,193,96,.4); }
+  .pswitch button.active[data-pf="youtube"] { background:rgba(255,0,0,.16); color:#ff4444; border-color:rgba(255,0,0,.4); }
   .hidden { display:none !important; }
 
   /* ════ 小红书:浅色暖调主题(整页随平台切换;抖音保持深色) ════ */
@@ -172,6 +172,19 @@
   body.pf-shipinhao .badge-lite { color:var(--acc); background:var(--acc-soft); }
   body.pf-shipinhao input[type=date]::-webkit-calendar-picker-indicator,
   body.pf-shipinhao input[type=datetime-local]::-webkit-calendar-picker-indicator { filter:invert(.7); }
+
+  /* ════ YouTube:深色 + 招牌红主题 #FF0000 ════ */
+  body.pf-youtube {
+    --acc:#ff0000; --acc-hover:#ff3333; --acc-soft:rgba(255,0,0,.15); --acc-ring:rgba(255,0,0,.38);
+    background:
+      radial-gradient(1200px 600px at 80% -10%, rgba(255,0,0,.10), transparent 60%),
+      radial-gradient(900px 500px at 0% 0%, rgba(255,80,80,.05), transparent 55%),
+      var(--bg);
+  }
+  body.pf-youtube .brand-mark { background:linear-gradient(135deg,#ff0000,#ff5555); box-shadow:0 4px 14px -4px var(--acc-ring); }
+  body.pf-youtube .badge-lite { color:var(--acc); background:var(--acc-soft); }
+  body.pf-youtube input[type=date]::-webkit-calendar-picker-indicator,
+  body.pf-youtube input[type=datetime-local]::-webkit-calendar-picker-indicator { filter:invert(.7); }
 
   /* ── 小红书笔记瀑布流卡片 ── */
   .xhs-grid { columns:240px; column-gap:14px; }
@@ -433,7 +446,6 @@
   .tab.active .tab-badge { color:var(--acc); border-color:var(--acc-ring); background:var(--acc-soft); }
   @media(max-width:600px){ .tabbar{top:54px} .tab{padding:8px 11px} }
   @media(max-width:820px){ .grid2{grid-template-columns:1fr} }
-  @media(max-width:600px){ main{padding:16px} header{padding:12px 16px} .stats{grid-template-columns:repeat(2,1fr)} }
 
   /* ── shell + sidebar ── */
   .shell { display:flex; align-items:flex-start; max-width:1240px; margin:0 auto; }
@@ -444,18 +456,35 @@
   .navitem.active { background:var(--surface-3); color:var(--fg-strong); border-color:var(--line); }
   .navitem svg { width:17px; height:17px; }
   .nav-sep { font-size:10.5px; font-weight:600; letter-spacing:.6px; color:var(--mut-2); text-transform:uppercase; padding:14px 12px 5px; }
-  @media(max-width:760px){ .nav-sep{ padding:10px 8px; } }
   .nav-label { flex:1; text-align:left; }
   .nav-badge { font:600 11px/1 var(--mono); color:var(--mut); background:var(--bg); border:1px solid var(--line); padding:2px 6px; border-radius:999px; }
   .navitem.active .nav-badge { color:var(--acc); border-color:var(--acc-ring); background:var(--acc-soft); }
-  .shell main { flex:1; min-width:0; max-width:none; margin:0; }
-  [data-panel] { display:grid; gap:18px; }
-  @media(max-width:760px){ .shell{flex-direction:column} .sidebar{position:static; flex:0 0 auto; width:100%; padding:8px 16px} .nav{flex-direction:row; overflow-x:auto} }
+  .shell main { flex:1; min-width:0; max-width:none; margin:0; overflow-x:clip; }
+  [data-panel] { display:grid; gap:18px; min-width:0; max-width:100%; }
+  .nav-toggle {
+    display:none; width:38px; height:38px; padding:0; flex:0 0 auto;
+    background:var(--surface); border:1px solid var(--line); color:var(--fg); border-radius:10px;
+  }
+  .nav-toggle svg { width:18px; height:18px; }
+  .nav-backdrop {
+    display:none; position:fixed; inset:0; z-index:80;
+    background:rgba(0,0,0,.5); backdrop-filter:blur(2px);
+    -webkit-tap-highlight-color:transparent;
+  }
+  .nav-backdrop[hidden] { display:none !important; }
+  .sidebar-head {
+    display:none; align-items:center; justify-content:space-between;
+    gap:10px; padding:14px 14px 12px; margin:0;
+    border-bottom:1px solid var(--line-soft); flex:0 0 auto;
+  }
+  .sidebar-title { font-size:13px; font-weight:650; color:var(--fg-strong); }
+  .sidebar-close { width:34px; height:34px; padding:0; flex:0 0 auto; }
 
   /* ── cards ── */
   .card {
     background:var(--surface); border:1px solid var(--line); border-radius:var(--r-lg);
     padding:20px; box-shadow:var(--sh-sm);
+    min-width:0; max-width:100%;
     transition:border-color .2s var(--ease), box-shadow .2s var(--ease);
   }
   .card:hover { border-color:#2d3340; box-shadow:var(--sh); }
@@ -509,10 +538,10 @@
     border-radius:999px; color:var(--info); background:color-mix(in srgb,var(--info) 10%,transparent);
     font-size:9.5px; line-height:1.35; vertical-align:1px;
   }
-  @media(max-width:820px){ .monitor-options{grid-template-columns:1fr 1fr} }
-  @media(max-width:820px){ .meta-fields{grid-template-columns:1fr 1fr} }
-  @media(max-width:480px){ .monitor-options,.meta-fields{grid-template-columns:1fr} }
-  .row > * { flex:1; }
+  @media(max-width:820px){ .monitor-options{grid-template-columns:minmax(0,1fr); gap:10px} }
+  @media(max-width:820px){ .meta-fields{grid-template-columns:minmax(0,1fr)} }
+  @media(max-width:480px){ .monitor-options,.meta-fields{grid-template-columns:minmax(0,1fr)} }
+  .row > * { flex:1; min-width:0; }
   .row > button { flex:0 0 auto; }
 
   /* 自定义下拉(渐进增强原生 select) */
@@ -591,7 +620,7 @@
   .check input { width:16px; height:16px; flex:0 0 auto; accent-color:var(--acc); cursor:pointer; }
 
   /* ── tables ── */
-  .table-wrap { overflow-x:auto; border-radius:var(--r); border:1px solid var(--line-soft); }
+  .table-wrap { overflow-x:auto; border-radius:var(--r); border:1px solid var(--line-soft); max-width:100%; min-width:0; }
   table { width:100%; border-collapse:collapse; }
   thead th { position:sticky; top:0; z-index:1; }
   th, td { text-align:left; padding:10px 12px; border-bottom:1px solid var(--line-soft); font-size:13px; vertical-align:middle; white-space:nowrap; }
@@ -742,13 +771,31 @@
   .meta-combo-empty { padding:12px 9px; color:var(--mut-2); font-size:12px; text-align:center; }
   #uimodal .rp-box { overflow:visible; }
   @media(max-width:600px) {
-    .manage-toolbar input, .manage-toolbar select, .manage-toolbar .cs { flex:1 1 calc(50% - 8px); max-width:none; }
+    .manage-toolbar input, .manage-toolbar select, .manage-toolbar .cs {
+      flex:1 1 100%; max-width:none; min-width:0; width:100%;
+    }
     .manage-toolbar input[type="search"] { min-width:0; }
     .manage-toolbar .toolbar-spacer { display:none; }
   }
 
   /* table inside a card without extra border for the small acc/notif tables */
   .mini-table { margin-top:14px; }
+
+  /* 分页条 */
+  .pager {
+    display:flex; align-items:center; flex-wrap:wrap; gap:8px;
+    margin-top:12px; padding-top:12px;
+    border-top:1px solid var(--line-soft);
+  }
+  .pager .pager-info { flex:1 1 auto; font-size:12.5px; color:var(--mut); }
+  .pager .pager-nav { display:inline-flex; align-items:center; gap:6px; }
+  .pager select { width:auto; min-width:0; flex:0 0 auto; padding:7px 28px 7px 10px; font-size:12.5px; }
+  @media (max-width:600px) {
+    .pager { gap:10px; }
+    .pager .pager-info { flex:1 1 100%; }
+    .pager .pager-nav { flex:1 1 auto; }
+    .pager select { flex:1 1 auto; width:100%; }
+  }
 
   /* ── pills ── */
   .pill {
@@ -785,6 +832,10 @@
   /* ── login ── */
   #qrbox { background:var(--surface-2); border:1px dashed var(--line); border-radius:var(--r); padding:16px; }
   #qrbox img { width:180px; height:180px; background:#fff; border-radius:8px; }
+  body.no-qr .qr-only { display:none !important; }
+  body.no-qr .cookie-fallback { display:inline-flex !important; }
+  #docker-login-hint { display:none; margin-bottom:14px; }
+  body.no-qr #docker-login-hint { display:block; }
   .mut { color:var(--mut); font-size:12px; }
   .hint { color:var(--mut-2); font-size:12px; line-height:1.55; }
   a { color:var(--info); text-decoration:none; }
@@ -860,17 +911,278 @@
   /* 行/卡片刷新时的轻微"陈旧"提示:配合 INFLIGHT 暂停轮询,这里给手动刷新一个柔和过渡 */
   .table-wrap.stale { opacity:.55; transition:opacity .2s var(--ease); }
 
+  /* ════ 响应式 ════ */
+  @media (max-width:980px) {
+    .shell { max-width:100%; }
+    .sidebar { flex:0 0 180px; padding:14px 8px; }
+    .navitem { padding:9px 10px; font-size:13px; }
+  }
+
+  @media (max-width:820px) {
+    header {
+      position:sticky; top:0; z-index:70;
+      display:grid;
+      grid-template-columns:38px minmax(0,1fr) auto;
+      grid-template-areas:
+        "toggle brand engine"
+        "pswitch pswitch pswitch";
+      gap:8px 10px; align-items:center;
+      padding:10px 12px calc(10px + env(safe-area-inset-top));
+      padding-top:calc(10px + env(safe-area-inset-top));
+    }
+    .nav-toggle { display:inline-flex; grid-area:toggle; }
+    .brand { grid-area:brand; min-width:0; gap:8px; }
+    header h1 { font-size:15px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .badge-lite { display:none; }
+    .spacer { display:none; }
+    .engine {
+      grid-area:engine; margin:0; font-size:11px; padding:5px 9px;
+      max-width:none;
+    }
+    .engine-text { display:none; }
+    .pswitch {
+      grid-area:pswitch; width:100%; max-width:100%;
+      overflow-x:auto; -webkit-overflow-scrolling:touch;
+      scrollbar-width:none; overscroll-behavior-x:contain;
+    }
+    .pswitch::-webkit-scrollbar { display:none; }
+    .pswitch button { flex:1 0 auto; padding:7px 12px; min-height:36px; }
+
+    .shell { display:block; width:100%; }
+    .shell main {
+      display:grid; gap:14px;
+      width:100%; max-width:100%;
+      padding:12px 12px calc(18px + env(safe-area-inset-bottom));
+      margin:0;
+    }
+    .card { padding:14px; min-width:0; }
+    .card-head { flex-wrap:wrap; gap:8px; }
+    .stack, .row, [data-panel] { min-width:0; max-width:100%; }
+    .card-head .right { margin-left:0; width:100%; }
+    .chart-legend { margin-left:0; width:100%; justify-content:flex-start; }
+    .row { flex-wrap:wrap; align-items:stretch; }
+    .row > * { flex:1 1 100%; min-width:0; }
+    .row > button,
+    .row > .cs,
+    .row > select { flex:1 1 calc(50% - 6px); }
+    .row.monitor-options > * { flex:1 1 100%; }
+    .acttd { white-space:normal; }
+    .acttd button { margin:3px 3px 0 0; white-space:nowrap; }
+
+    /* 监控/评论监控列表：窄屏改卡片，操作按钮横排两列 */
+    .table-wrap.list-cards {
+      border:0; background:transparent; overflow:visible; border-radius:0;
+    }
+    .list-cards table,
+    .list-cards thead,
+    .list-cards tbody,
+    .list-cards tr,
+    .list-cards td {
+      display:block; width:100%; max-width:100%;
+    }
+    .list-cards thead { display:none; }
+    .list-cards tr {
+      background:var(--surface-2);
+      border:1px solid var(--line);
+      border-radius:var(--r);
+      padding:12px;
+      margin-bottom:10px;
+    }
+    .list-cards td {
+      border:0; padding:4px 0; white-space:normal; text-align:left;
+    }
+    .list-cards td[data-label] {
+      display:flex; align-items:flex-start; gap:8px;
+    }
+    .list-cards td[data-label]::before {
+      content:attr(data-label);
+      flex:0 0 4.5em;
+      color:var(--mut);
+      font-size:11.5px;
+      line-height:1.6;
+      padding-top:1px;
+    }
+    .list-cards td.card-main,
+    .list-cards td.card-main[data-label] {
+      display:block; padding-bottom:8px;
+    }
+    .list-cards td.card-main::before { display:none; }
+    .list-cards .user-cell { align-items:flex-start; min-width:0; }
+    .list-cards .user-cell > div { min-width:0; flex:1; overflow-wrap:anywhere; }
+    .list-cards .acttd,
+    .list-cards td.acttd[data-label] {
+      display:grid;
+      grid-template-columns:repeat(2, minmax(0, 1fr));
+      gap:8px;
+      margin-top:10px; padding-top:10px;
+      border-top:1px solid var(--line-soft);
+    }
+    .list-cards .acttd::before { display:none; }
+    .list-cards .acttd button {
+      margin:0; width:100%; min-height:40px;
+      white-space:nowrap; writing-mode:horizontal-tb;
+      justify-content:center;
+    }
+    .xhs-grid { columns:1; column-gap:12px; }
+    .local-path-cell { width:auto; min-width:0; max-width:none; }
+    .manage-toolbar {
+      padding:8px; gap:8px;
+    }
+    .manage-toolbar input, .manage-toolbar select, .manage-toolbar .cs {
+      flex:1 1 100%; width:100%; max-width:none; min-width:0;
+    }
+    .meta-fields { grid-template-columns:1fr; }
+    .monitor-options {
+      display:grid;
+      grid-template-columns:minmax(0, 1fr);
+      gap:10px;
+      width:100%;
+      max-width:100%;
+      min-width:0;
+    }
+    .monitor-options > * { min-width:0; max-width:100%; width:100%; }
+
+    /* 侧栏抽屉：关闭时 display:none，避免 transform 离屏仍可横向拖出 */
+    .nav-backdrop:not([hidden]),
+    body.nav-open .nav-backdrop { display:block; }
+    .sidebar-head { display:flex; }
+    .sidebar {
+      position:fixed;
+      inset:0 auto 0 0;
+      top:0; right:auto; bottom:0; left:0;
+      z-index:90;
+      width:min(300px, 88vw);
+      max-width:100%;
+      height:100%;
+      height:100dvh;
+      min-height:100%;
+      min-height:100dvh;
+      margin:0; padding:0;
+      padding-top:env(safe-area-inset-top);
+      padding-bottom:env(safe-area-inset-bottom);
+      background:var(--surface);
+      border-right:1px solid var(--line);
+      box-shadow:var(--sh-lg);
+      overflow:hidden;
+      flex:none;
+      flex-direction:column;
+      align-self:auto;
+      display:none;
+    }
+    body.pf-xhs .sidebar { background:#fff; }
+    body.nav-open .sidebar { display:flex; }
+    body.nav-open { overflow:hidden; touch-action:none; }
+    .sidebar .nav {
+      flex:1 1 auto; min-height:0;
+      overflow-y:auto; -webkit-overflow-scrolling:touch;
+      flex-direction:column; padding:8px 10px 20px;
+      overscroll-behavior:contain;
+    }
+    .navitem { min-height:44px; padding:12px; font-size:14px; }
+    .nav-sep { padding:14px 12px 6px; }
+
+    /* 迷你表（账号/代理）改成卡片，避免横向拖整页 */
+    .mini-table {
+      border:0 !important; background:transparent; overflow:visible;
+      border-radius:0;
+    }
+    .mini-table table,
+    .mini-table tbody,
+    .mini-table tr,
+    .mini-table td {
+      display:block; width:100%; max-width:100%;
+    }
+    .mini-table tr {
+      background:var(--surface-2);
+      border:1px solid var(--line);
+      border-radius:var(--r);
+      padding:12px;
+      margin-bottom:10px;
+    }
+    .mini-table td {
+      border:0; padding:4px 0; white-space:normal; text-align:left;
+    }
+    .mini-table .user-cell { align-items:flex-start; min-width:0; }
+    .mini-table .user-cell > div { min-width:0; flex:1; overflow-wrap:anywhere; }
+    .mini-table .acttd {
+      display:grid;
+      grid-template-columns:repeat(2, minmax(0, 1fr));
+      gap:8px;
+      margin-top:10px; padding-top:10px;
+      border-top:1px solid var(--line-soft);
+    }
+    .mini-table .acttd button {
+      margin:0; width:100%; min-height:40px;
+      justify-content:center;
+    }
+
+    /* 宽表只在容器内横滑，不撑破页面 */
+    .table-wrap {
+      max-width:100%;
+      overflow-x:auto;
+      -webkit-overflow-scrolling:touch;
+      overscroll-behavior-x:contain;
+    }
+    .content-record-table { min-width:680px; }
+
+    /* 防止 iOS 聚焦输入时强制放大页面 */
+    input, textarea, select, .cs-trg, .dt-trg { font-size:16px; }
+  }
+
+  @media (max-width:600px) {
+    .stats { grid-template-columns:repeat(2,1fr); gap:10px; }
+    .stat { padding:12px; gap:10px; }
+    .stat-v { font-size:18px; }
+    .card { padding:14px; border-radius:var(--r); }
+    .card h2 { font-size:14px; flex-wrap:wrap; }
+    .card h2 .sub { width:100%; margin-top:2px; }
+    th, td { padding:9px 10px; font-size:12.5px; }
+    .ncard { margin-bottom:12px; }
+    #toasts {
+      left:12px; right:12px; bottom:calc(12px + env(safe-area-inset-bottom));
+      max-width:none;
+    }
+    .toast { max-width:none; }
+    #busy-spinner { top:calc(10px + env(safe-area-inset-top)); max-width:calc(100vw - 24px); }
+    .dm-bubble.card, .dm-bubble { max-width:88%; }
+    .fu-sign { max-width:100%; }
+    .meta-stack { max-width:100%; }
+    .pv-overlay { padding:8px; align-items:flex-end; }
+    .pv-box, .rp-box {
+      width:100% !important;
+      max-width:100% !important;
+      max-height:min(92dvh, 92vh);
+      border-radius:16px 16px 0 0;
+    }
+    .monitor-options, .meta-fields { grid-template-columns:1fr; }
+    .row > button,
+    .row > .cs,
+    .row > select { flex:1 1 100%; }
+  }
+
+  @media (max-width:420px) {
+    .stats { grid-template-columns:1fr; }
+    .pswitch button { padding:7px 10px; font-size:12px; }
+    header h1 { font-size:14px; }
+    .brand-mark { width:30px; height:30px; border-radius:8px; }
+  }
+
   @media (prefers-reduced-motion:reduce) {
     *, *::before, *::after { animation-duration:.001ms !important; transition-duration:.001ms !important; scroll-behavior:auto !important; }
   }
   /* 触摸设备:放大可点区域到舒适尺寸(桌面端保持紧凑密度)*/
   @media (pointer:coarse) {
-    button.sm { padding:8px 12px; }
-    .navitem, .tab { padding-top:11px; padding-bottom:11px; }
+    button.sm { padding:8px 12px; min-height:36px; }
+    .navitem, .tab { padding-top:12px; padding-bottom:12px; }
     input, textarea, select { padding-top:11px; padding-bottom:11px; }
-    .acttd button { margin-left:6px; }
+    .acttd button { margin-left:0; }
   }
 </style>
+<!-- 字体非阻塞加载:失败时回退系统字体,不拖住首屏 -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600&family=Fira+Sans:wght@300;400;500;600;700&display=swap" media="print" onload="this.media='all'">
+<noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600&family=Fira+Sans:wght@300;400;500;600;700&display=swap"></noscript>
 </head>
 <body>
 <div id="busy-spinner" aria-hidden="true"><span class="bs-ring"></span><span class="bs-label" id="bs-label">处理中</span></div>
@@ -904,36 +1216,46 @@
   <symbol id="i-card" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="5" width="20" height="14" rx="2.5"/><path d="M2 10h20M6 15h4"/></symbol>
   <symbol id="i-heart-up" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 10v11M2 13l2-3h11l-1.4 7a2 2 0 0 1-2 1.7H7"/><path d="M7 10 11 2a2 2 0 0 1 2.7 2.3L13 10"/></symbol>
   <symbol id="i-folder" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></symbol>
+  <symbol id="i-menu" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 12h16M4 18h16"/></symbol>
   <symbol id="i-trash" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4h8v2M19 6l-1 15H6L5 6M10 10v7M14 10v7"/></symbol>
 </svg>
 
 <header>
+  <button type="button" class="nav-toggle ghost" id="nav-toggle" aria-label="打开菜单" aria-expanded="false" aria-controls="app-sidebar" onclick="toggleNav()">
+    <svg><use href="#i-menu"/></svg>
+  </button>
   <div class="brand">
     <span class="brand-mark"><svg><use href="#i-logo"/></svg></span>
     <h1>CreatorHub<span class="badge-lite">LITE</span></h1>
   </div>
   <div class="pswitch" role="tablist" aria-label="平台切换">
-    <button data-pf="douyin" onclick="switchPlatform('douyin')">抖音</button>
-    <button data-pf="xhs" onclick="switchPlatform('xhs')">小红书</button>
-    <button data-pf="kuaishou" onclick="switchPlatform('kuaishou')">快手</button>
-    <button data-pf="shipinhao" onclick="switchPlatform('shipinhao')">视频号</button>
+    <button type="button" data-pf="douyin" onclick="switchPlatform('douyin')">抖音</button>
+    <button type="button" data-pf="xhs" onclick="switchPlatform('xhs')">小红书</button>
+    <button type="button" data-pf="kuaishou" onclick="switchPlatform('kuaishou')">快手</button>
+    <button type="button" data-pf="shipinhao" onclick="switchPlatform('shipinhao')">视频号</button>
+    <button type="button" data-pf="youtube" onclick="switchPlatform('youtube')">YouTube</button>
   </div>
   <span class="spacer"></span>
-  <span class="engine" id="engine-status"><span class="dot live"></span>引擎运行中</span>
+  <span class="engine" id="engine-status"><span class="dot live"></span><span class="engine-text">引擎运行中</span></span>
 </header>
 
+<div class="nav-backdrop" id="nav-backdrop" onclick="closeNav()" hidden></div>
 <div class="shell">
-<aside class="sidebar">
+<aside class="sidebar" id="app-sidebar">
+  <div class="sidebar-head">
+    <span class="sidebar-title">菜单</span>
+    <button type="button" class="ghost sm sidebar-close" onclick="closeNav()" aria-label="关闭菜单"><svg><use href="#i-x"/></svg></button>
+  </div>
   <nav class="nav">
     <button class="navitem" data-tab="overview" onclick="switchTab('overview')"><svg><use href="#i-bolt"/></svg><span class="nav-label">总览</span></button>
     <button class="navitem" data-tab="accounts" onclick="switchTab('accounts')"><svg><use href="#i-user"/></svg><span class="nav-label">账号</span><span class="nav-badge" id="tb-acc">0</span></button>
     <button class="navitem notsh-only" data-tab="monitors" onclick="switchTab('monitors')"><svg><use href="#i-target"/></svg><span class="nav-label">作品监控</span><span class="nav-badge" id="tb-mon">0</span></button>
-    <button class="navitem notsh-only" data-tab="comments" onclick="switchTab('comments')"><svg><use href="#i-msg"/></svg><span class="nav-label">评论监控</span><span class="nav-badge" id="tb-watch">0</span></button>
+    <button class="navitem notsh-only no-yt-only" data-tab="comments" onclick="switchTab('comments')"><svg><use href="#i-msg"/></svg><span class="nav-label">评论监控</span><span class="nav-badge" id="tb-watch">0</span></button>
     <div class="nav-sep">本账号</div>
     <button class="navitem" data-tab="hub" onclick="switchTab('hub')"><svg><use href="#i-user"/></svg><span class="nav-label">账号管理</span></button>
     <div class="nav-sep">工具</div>
     <button class="navitem pub-only" data-tab="publish" onclick="switchTab('publish')"><svg><use href="#i-send"/></svg><span class="nav-label">发布</span><span class="nav-badge" id="tb-pub">0</span></button>
-    <button class="navitem notsh-only" data-tab="autocomment" onclick="switchTab('autocomment')"><svg><use href="#i-msg"/></svg><span class="nav-label">自动评论</span><span class="nav-badge" id="tb-ac">0</span></button>
+    <button class="navitem notsh-only no-yt-only" data-tab="autocomment" onclick="switchTab('autocomment')"><svg><use href="#i-msg"/></svg><span class="nav-label">自动评论</span><span class="nav-badge" id="tb-ac">0</span></button>
     <button class="navitem" data-tab="share-download" onclick="switchTab('share-download')"><svg><use href="#i-download"/></svg><span class="nav-label">链接下载</span></button>
     <button class="navitem" data-tab="notifications" onclick="switchTab('notifications')"><svg><use href="#i-bell"/></svg><span class="nav-label">通知</span></button>
     <button class="navitem" data-tab="settings" onclick="switchTab('settings')"><svg><use href="#i-download"/></svg><span class="nav-label">设置</span></button>
@@ -958,7 +1280,7 @@
     </div>
     <div class="chart-wrap" id="overview-chart"><div class="chart-empty">加载中…</div></div>
   </div>
-  <div class="card"><div class="hint">顶部切换 <b>抖音 / 小红书 / 快手 / 视频号</b> 平台,各平台拥有独立的账号、监控与评论数据;左侧切换模块进行管理。小红书支持 <b>创作者笔记</b> 与 <b>关键词</b> 两种监控;快手支持 <b>创作者作品</b> 监控、自动评论与发布。<b>视频号</b>因助手接口只有本账号数据,仅支持 <b>账号 / 本账号作品·数据 / 发布</b>,不做监控他人。通知与下载设置为全局共用。</div></div>
+  <div class="card"><div class="hint">顶部切换 <b>抖音 / 小红书 / 快手 / 视频号 / YouTube</b> 平台,各平台拥有独立的账号与数据;左侧切换模块进行管理。小红书支持 <b>创作者笔记</b> 与 <b>关键词</b> 两种监控;快手支持 <b>创作者作品</b> 监控、自动评论与发布。<b>视频号</b>因助手接口只有本账号数据,仅支持 <b>账号 / 本账号作品·数据 / 发布</b>。<b>YouTube</b> 支持 <b>频道监控下载 / 本账号作品·数据 / Studio 发布</b>(暂无评论监控与关注粉丝私信)。通知与下载设置为全局共用。</div></div>
   </section>
 
   <section data-panel="accounts">
@@ -969,16 +1291,22 @@
         <h2>账号 <span class="sub">登录 / 管理</span></h2>
       </div>
       <div class="row" style="margin-bottom:14px;flex-wrap:wrap">
-        <button class="dy-only" onclick="startLogin()"><svg><use href="#i-logo"/></svg>扫码登录</button>
-        <button class="ghost dy-only" onclick="startCreatorLogin()"><svg><use href="#i-logo"/></svg>创作者登录</button>
+        <button class="dy-only qr-only" onclick="startLogin()"><svg><use href="#i-logo"/></svg>扫码登录</button>
+        <button class="ghost dy-only qr-only" onclick="startCreatorLogin()"><svg><use href="#i-logo"/></svg>创作者登录</button>
         <button class="ghost dy-only" onclick="toggleCookie()">Cookie 粘贴</button>
-        <button class="xhs-only" onclick="startXhsLogin()"><svg><use href="#i-logo"/></svg>小红书扫码登录</button>
-        <button class="ghost xhs-only" onclick="startXhsCreatorLogin()"><svg><use href="#i-send"/></svg>小红书创作者登录</button>
+        <button class="xhs-only qr-only" onclick="startXhsLogin()"><svg><use href="#i-logo"/></svg>小红书扫码登录</button>
+        <button class="ghost xhs-only qr-only" onclick="startXhsCreatorLogin()"><svg><use href="#i-send"/></svg>小红书创作者登录</button>
         <button class="ghost xhs-only" onclick="toggleCookie()">Cookie 粘贴</button>
-        <button class="ks-only" onclick="startKsLogin()"><svg><use href="#i-logo"/></svg>快手扫码登录</button>
-        <button class="ghost ks-only" onclick="startKsCreatorLogin()"><svg><use href="#i-send"/></svg>快手创作者登录</button>
+        <button class="ks-only qr-only" onclick="startKsLogin()"><svg><use href="#i-logo"/></svg>快手扫码登录</button>
+        <button class="ghost ks-only qr-only" onclick="startKsCreatorLogin()"><svg><use href="#i-send"/></svg>快手创作者登录</button>
         <button class="ghost ks-only" onclick="toggleCookie()">Cookie 粘贴</button>
-        <button class="sh-only" onclick="startChannelsLogin()"><svg><use href="#i-logo"/></svg>视频号登录</button>
+        <button class="sh-only qr-only" onclick="startChannelsLogin()"><svg><use href="#i-logo"/></svg>视频号登录</button>
+        <button class="ghost sh-only cookie-fallback" style="display:none" onclick="toggleCookie()">Cookie 粘贴</button>
+        <button class="yt-only qr-only" onclick="startYoutubeLogin()"><svg><use href="#i-logo"/></svg>YouTube 登录</button>
+        <button class="ghost yt-only" onclick="toggleCookie()">Cookie 粘贴</button>
+      </div>
+      <div id="docker-login-hint" class="hint" style="border-left:3px solid var(--warn);padding-left:10px">
+        Docker / 无桌面模式：扫码登录已关闭。请用上方「Cookie 粘贴」从本机浏览器复制完整 Cookie 登录。
       </div>
       <div id="qrbox" style="display:none;margin-bottom:14px">
         <div class="mut" id="qrstatus">准备中…</div>
@@ -1069,7 +1397,7 @@
             <option value="1800">每 30 分钟</option>
             <option value="3600">每小时</option>
           </select>
-          <select id="t-quality" class="dy-only" aria-label="画质">
+          <select id="t-quality" class="dy-yt-only" aria-label="画质">
             <option value="">画质:默认</option>
             <option value="highest">原画/最高</option>
             <option value="1080">1080P</option>
@@ -1077,7 +1405,7 @@
             <option value="540">540P</option>
             <option value="lowest">最低省流</option>
           </select>
-          <select id="t-backfill" class="dy-only" aria-label="首次历史回填">
+          <select id="t-backfill" class="dy-yt-only" aria-label="首次历史回填">
             <option value="0">历史:不下载</option>
             <option value="5">历史:最近 5 条</option>
             <option value="20">历史:最近 20 条</option>
@@ -1102,7 +1430,7 @@
           <textarea id="sd-text" rows="5" placeholder="例如：复制这段内容，打开对应平台查看作品 https://v.douyin.com/xxxx/ 😄&#10;支持全角符号、HTML 实体、URL 编码、Unicode 转义和一段文字中的多个链接"></textarea>
         </div>
         <div class="row" style="flex-wrap:wrap">
-          <select id="sd-quality" aria-label="下载画质" style="flex:0 0 170px">
+          <select id="sd-quality" aria-label="下载画质" style="flex:1 1 170px;min-width:0">
             <option value="highest">画质：原画/最高</option>
             <option value="1080">画质：1080P</option>
             <option value="720">画质：720P</option>
@@ -1110,10 +1438,10 @@
             <option value="lowest">画质：最低省流</option>
             <option value="audio">仅音频</option>
           </select>
-          <select id="sd-account" aria-label="复用账号登录态" style="min-width:220px">
+          <select id="sd-account" aria-label="复用账号登录态" style="flex:1 1 220px;min-width:0">
             <option value="">先识别链接，再选择对应平台账号</option>
           </select>
-          <input id="sd-dir" placeholder="下载目录（留空使用全局目录/share）" aria-label="下载目录" style="min-width:260px">
+          <input id="sd-dir" placeholder="下载目录（留空使用全局目录/share）" aria-label="下载目录" style="flex:1 1 220px;min-width:0">
           <input id="sd-max-size" type="number" min="0" max="102400" value="0" placeholder="文件上限 MB，0=不限" aria-label="文件大小上限" style="flex:0 0 190px">
         </div>
         <div class="row" style="justify-content:flex-start;flex-wrap:wrap;gap:16px">
@@ -1407,9 +1735,23 @@
       <select id="mon-tag" aria-label="按标签筛选监控" onchange="onMonitorFilter()"><option value="">全部标签</option></select>
       <span class="mut" id="mon-filter-count"></span>
     </div>
-    <div class="table-wrap"><table><thead><tr>
+      <div class="table-wrap list-cards"><table><thead><tr>
       <th>用户</th><th>分组 / 标签</th><th>作品数</th><th>间隔</th><th>下载设置</th><th>上次扫描</th><th>状态</th><th></th>
     </tr></thead><tbody id="mon-table"></tbody></table></div>
+    <div class="pager" id="mon-pager" hidden>
+      <span class="pager-info" id="mon-page-info">共 0 条</span>
+      <div class="pager-nav">
+        <button type="button" class="ghost sm" id="mon-prev" onclick="monPrevPage()" disabled>上一页</button>
+        <span class="mut" id="mon-page-num">1 / 1</span>
+        <button type="button" class="ghost sm" id="mon-next" onclick="monNextPage()" disabled>下一页</button>
+      </div>
+      <select id="mon-page-size" aria-label="每页条数" onchange="onMonPageSize()">
+        <option value="10" selected>10 条/页</option>
+        <option value="20">20 条/页</option>
+        <option value="50">50 条/页</option>
+        <option value="100">100 条/页</option>
+      </select>
+    </div>
   </div>
 
   <!-- 下载记录 -->
@@ -1444,6 +1786,20 @@
       </tr></thead><tbody id="content-table"></tbody>
     </table></div>
     <div id="content-cards" class="xhs-grid" style="display:none"></div>
+    <div class="pager" id="content-pager" hidden>
+      <span class="pager-info" id="content-page-info">共 0 条</span>
+      <div class="pager-nav">
+        <button type="button" class="ghost sm" id="content-prev" onclick="contentPrevPage()" disabled>上一页</button>
+        <span class="mut" id="content-page-num">1 / 1</span>
+        <button type="button" class="ghost sm" id="content-next" onclick="contentNextPage()" disabled>下一页</button>
+      </div>
+      <select id="content-page-size" aria-label="每页条数" onchange="onContentPageSize()">
+        <option value="10" selected>10 条/页</option>
+        <option value="20">20 条/页</option>
+        <option value="50">50 条/页</option>
+        <option value="100">100 条/页</option>
+      </select>
+    </div>
   </div>
   </section>
 
@@ -1507,9 +1863,23 @@
         <select id="watch-tag" aria-label="按标签筛选评论监控" onchange="onWatchFilter()"><option value="">全部标签</option></select>
         <span class="mut" id="watch-filter-count"></span>
       </div>
-      <div class="table-wrap"><table><thead><tr>
+      <div class="table-wrap list-cards"><table><thead><tr>
         <th>对象</th><th>分组 / 标签</th><th>类型</th><th>来源</th><th>评论数</th><th>间隔</th><th>上次扫描</th><th>状态</th><th>操作</th>
       </tr></thead><tbody id="watch-table"></tbody></table></div>
+    <div class="pager" id="watch-pager" hidden>
+      <span class="pager-info" id="watch-page-info">共 0 条</span>
+      <div class="pager-nav">
+        <button type="button" class="ghost sm" id="watch-prev" onclick="watchPrevPage()" disabled>上一页</button>
+        <span class="mut" id="watch-page-num">1 / 1</span>
+        <button type="button" class="ghost sm" id="watch-next" onclick="watchNextPage()" disabled>下一页</button>
+      </div>
+      <select id="watch-page-size" aria-label="每页条数" onchange="onWatchPageSize()">
+        <option value="10" selected>10 条/页</option>
+        <option value="20">20 条/页</option>
+        <option value="50">50 条/页</option>
+        <option value="100">100 条/页</option>
+      </select>
+    </div>
     </div>
 
   <!-- 评论数据 -->
@@ -1534,6 +1904,20 @@
       <th style="width:30px"><input type="checkbox" id="comment-selall" onchange="commentToggleAll(this.checked)" aria-label="全选"></th>
       <th>评论</th><th>用户</th><th>赞</th><th>评论时间</th><th>操作</th>
     </tr></thead><tbody id="comment-table"></tbody></table></div>
+    <div class="pager" id="comment-pager" hidden>
+      <span class="pager-info" id="comment-page-info">共 0 条</span>
+      <div class="pager-nav">
+        <button type="button" class="ghost sm" id="comment-prev" onclick="commentPrevPage()" disabled>上一页</button>
+        <span class="mut" id="comment-page-num">1 / 1</span>
+        <button type="button" class="ghost sm" id="comment-next" onclick="commentNextPage()" disabled>下一页</button>
+      </div>
+      <select id="comment-page-size" aria-label="每页条数" onchange="onCommentPageSize()">
+        <option value="10" selected>10 条/页</option>
+        <option value="20">20 条/页</option>
+        <option value="50">50 条/页</option>
+        <option value="100">100 条/页</option>
+      </select>
+    </div>
   </div>
   </section>
 
@@ -1549,9 +1933,9 @@
       </div>
       <div class="tabbar" style="position:static;margin-bottom:14px">
         <button class="tab active" data-hubtab="myworks" onclick="switchHubTab('myworks')"><svg><use href="#i-film"/></svg>我的作品 <span class="tab-badge" id="hb-myworks">0</span></button>
-        <button class="tab notsh-only" data-hubtab="following" onclick="switchHubTab('following')"><svg><use href="#i-user"/></svg>关注 <span class="tab-badge" id="hb-following">0</span></button>
-        <button class="tab notsh-only" data-hubtab="fans" onclick="switchHubTab('fans')"><svg><use href="#i-heart"/></svg>粉丝 <span class="tab-badge" id="hb-fans">0</span></button>
-        <button class="tab notsh-only" data-hubtab="dm" onclick="switchHubTab('dm')"><svg><use href="#i-send"/></svg>私信 <span class="tab-badge" id="hb-dm">0</span></button>
+        <button class="tab notsh-only no-yt-only" data-hubtab="following" onclick="switchHubTab('following')"><svg><use href="#i-user"/></svg>关注 <span class="tab-badge" id="hb-following">0</span></button>
+        <button class="tab notsh-only no-yt-only" data-hubtab="fans" onclick="switchHubTab('fans')"><svg><use href="#i-heart"/></svg>粉丝 <span class="tab-badge" id="hb-fans">0</span></button>
+        <button class="tab notsh-only no-yt-only" data-hubtab="dm" onclick="switchHubTab('dm')"><svg><use href="#i-send"/></svg>私信 <span class="tab-badge" id="hb-dm">0</span></button>
         <button class="tab" data-hubtab="stats" onclick="switchHubTab('stats')"><svg><use href="#i-eye"/></svg>数据 <span class="tab-badge" id="hb-stats">0</span></button>
       </div>
 
@@ -1701,6 +2085,6 @@
 
 <div id="toasts" aria-live="polite" aria-atomic="false"></div>
 
-<script src="/static/app.js"></script>
+<script src="/static/app.js?v=20260804-yt-hub-pub"></script>
 </body>
 </html>

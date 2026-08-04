@@ -1,0 +1,31 @@
+# Python / uv / caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Node
+node_modules/
+
+# Runtime / local data (mounted at runtime)
+data/
+config.yaml
+share/
+*.db
+*.mp4
+*.mov
+*.mkv
+
+# Git / IDE
+.git/
+.gitattributes
+.idea/
+.vscode/
+.claude/
+docs/
+
+# Misc large / local
+assets/screenshots/
+大玉儿/

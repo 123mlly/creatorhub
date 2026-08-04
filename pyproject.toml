@@ -1,0 +1,32 @@
+[project]
+name = "creatorhub"
+version = "0.1.0"
+description = "本地运行的多平台内容管理面板（抖音 / 小红书 / 快手 / 视频号）"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi==0.115.6",
+    "uvicorn[standard]==0.34.0",
+    "httpx[socks]==0.28.1",
+    "pyyaml==6.0.2",
+    "sqlmodel==0.0.22",
+    "playwright==1.49.1",
+    "xhshow>=0.2.0",
+    "curl_cffi>=0.7",
+    "python-multipart>=0.0.9",
+    "PyExecJS>=1.5.1",
+    "opencv-python-headless>=4.8",
+    "numpy>=1.24",
+    "websockets>=12",
+    "yt-dlp>=2025.1.15",
+    "imageio-ffmpeg>=0.5.1",
+    "pywebview>=5.3",
+]
+
+[project.optional-dependencies]
+package = [
+    "pyinstaller>=6.11",
+]
+
+[tool.uv]
+package = false

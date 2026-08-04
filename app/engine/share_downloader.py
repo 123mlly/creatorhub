@@ -524,7 +524,7 @@ class ShareDownloader:
             import yt_dlp  # type: ignore
         except ImportError as exc:
             raise ShareDownloadError(
-                "缺少 yt-dlp 依赖，请先执行：python -m pip install -r requirements.txt"
+                "缺少 yt-dlp 依赖，请先执行：uv sync"
             ) from exc
         return yt_dlp
 
@@ -566,6 +566,12 @@ class ShareDownloader:
             options["proxy"] = proxy
         if cookie_file:
             options["cookiefile"] = cookie_file
+        # YouTube n challenge 需要 JS runtime + EJS remote components
+        try:
+            from ..platforms.youtube import apply_yt_dlp_youtube_opts
+            apply_yt_dlp_youtube_opts(options)
+        except Exception:
+            pass
         return options
 
     def _inspect_sync(

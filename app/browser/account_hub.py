@@ -184,6 +184,39 @@ def _norm_ks_work(feed: dict) -> Optional[dict]:
     }
 
 
+def _norm_youtube_work(it: dict) -> Optional[dict]:
+    """yt-dlp flat playlist / extract 条目 → AccountWork 字段。"""
+    if not isinstance(it, dict):
+        return None
+    vid = (it.get("id") or "").strip()
+    if not vid and it.get("url"):
+        from ..platforms.youtube import resolve_youtube_video_id
+        vid = resolve_youtube_video_id(str(it.get("url"))) or ""
+    if not vid:
+        return None
+    title = (it.get("title") or it.get("fulltitle") or vid).strip()
+    cover = it.get("thumbnail") or ""
+    if not cover:
+        thumbs = it.get("thumbnails") or []
+        if isinstance(thumbs, list) and thumbs:
+            cover = (thumbs[-1] or {}).get("url") or ""
+    return {
+        "item_id": vid,
+        "desc": title,
+        "media_type": "video",
+        "cover_url": cover or "",
+        "create_time": _num(it.get("timestamp") or it.get("release_timestamp")),
+        "like_count": _num(it.get("like_count")),
+        "comment_count": _num(it.get("comment_count")),
+        "collect_count": 0,
+        "share_count": 0,
+        "play_count": _num(it.get("view_count") or it.get("viewpoint_count")),
+        "status": "",
+        "xsec_token": "",
+        "raw_json": json.dumps(it, ensure_ascii=False)[:4000],
+    }
+
+
 def _norm_channels_work(it: dict) -> Optional[dict]:
     """视频号助手 post_list 一项 -> 本账号作品 dict。视频号视频加密不可下载,
     这里只记元数据+统计(供本账号作品展示 + 作品健康监控)。字段以真机抓包为准。"""
@@ -231,6 +264,8 @@ async def fetch_account_works(mgr: BrowserManager, identity, platform: str, uid:
     入参用 identity/platform/uid 原语(由调用方在 session 活跃时取出),避免 ORM 实例失效。"""
     uid = (uid or "").strip()
     open_url = ""
+    if platform == "youtube":
+        return await _fetch_youtube_account_works(identity, uid, max_scrolls=max_scrolls)
     if platform == "xhs":
         # 小红书:站内「我」入口拿真实主页链接(带 xsec_token);失败再退回 uid 直开
         open_url, self_uid = await _self_profile_link(mgr, identity, "xhs")
@@ -278,6 +313,53 @@ async def fetch_account_works(mgr: BrowserManager, identity, platform: str, uid:
 
     out = [w for w in (norm(it) for it in (items or [])) if w]
     return out, ("" if out else err)
+
+
+async def _fetch_youtube_account_works(identity, uid: str,
+                                       max_scrolls: int = 14) -> Tuple[List[dict], str]:
+    """YouTube 本账号作品:yt-dlp 拉自己频道 /videos(需 sec_uid=UC… 或 @handle)。"""
+    from ..db import get_session
+    from ..models import DouyinAccount
+    from ..platforms.youtube import fetch_youtube_videos
+
+    state, proxy, channel = "", "", (uid or "").strip()
+    if identity and identity.account_id is not None:
+        with get_session() as s:
+            acc = s.get(DouyinAccount, identity.account_id)
+            if acc:
+                state = acc.storage_state or ""
+                proxy = acc.proxy or ""
+                channel = (acc.sec_uid or channel or "").strip()
+                if not channel and acc.douyin_id:
+                    channel = acc.douyin_id.strip()
+    if not channel:
+        return [], "missing_uid:账号缺频道 ID,请先点账号「刷新资料」再同步作品"
+    limit = max(10, min(int(max_scrolls or 14) * 5, 50))
+    entries, author, err = await fetch_youtube_videos(
+        channel, known_ids=set(), limit=limit, proxy=proxy, state_json=state)
+    out = [w for w in (_norm_youtube_work(it) for it in (entries or [])) if w]
+    # 顺带把频道元信息写回账号(粉丝/作品数若有)
+    if author and identity and identity.account_id is not None:
+        try:
+            with get_session() as s:
+                acc = s.get(DouyinAccount, identity.account_id)
+                if acc:
+                    if author.get("nickname") and not acc.nickname:
+                        acc.nickname = author["nickname"]
+                    if author.get("sec_uid") and not acc.sec_uid:
+                        acc.sec_uid = author["sec_uid"]
+                    if author.get("avatar"):
+                        acc.avatar = author["avatar"] or acc.avatar
+                    if author.get("follower_count"):
+                        acc.follower_count = author["follower_count"]
+                    if author.get("aweme_count"):
+                        acc.aweme_count = author["aweme_count"]
+                    elif out:
+                        acc.aweme_count = max(acc.aweme_count or 0, len(out))
+                    s.add(acc); s.commit()
+        except Exception:
+            pass
+    return out, ("" if out else (err or "未抓到作品"))
 
 
 # ═══════════ 关注 / 粉丝(无公开接口:拦截该账号登录态打开的关注/粉丝页 XHR) ═══════════

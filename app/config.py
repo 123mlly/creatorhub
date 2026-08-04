@@ -79,11 +79,26 @@ class Config:
     proxies: List[str] = field(default_factory=list)  # 代理池;建号时一号一代理 sticky 分配
 
 
+def _resolve_data_path(p: str) -> str:
+    """相对路径锚定到 CREATORHUB_DATA_DIR(打包/桌面)或当前工作目录。"""
+    path = Path(p).expanduser()
+    if path.is_absolute():
+        return str(path)
+    base = (os.environ.get("CREATORHUB_DATA_DIR") or "").strip()
+    if base:
+        return str((Path(base) / path).resolve())
+    return str(path.resolve())
+
+
 def load_config(path: str | None = None) -> Config:
     path = path or os.environ.get("CREATORHUB_CONFIG_PATH") \
         or os.environ.get("DY_CONFIG_PATH", "config.yaml")
     cfg = Config()
     p = Path(path)
+    if not p.is_absolute():
+        base = (os.environ.get("CREATORHUB_DATA_DIR") or "").strip()
+        if base:
+            p = Path(base) / p
     if p.exists():
         raw = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
         s = raw.get("server", {})
@@ -94,6 +109,9 @@ def load_config(path: str | None = None) -> Config:
         cfg.db_path = (raw.get("storage", {}) or {}).get("db_path", cfg.db_path)
         px = raw.get("proxies") or []
         cfg.proxies = [str(p).strip() for p in px if str(p).strip()]
+    cfg.db_path = _resolve_data_path(cfg.db_path)
+    cfg.engine.media_dir = _resolve_data_path(cfg.engine.media_dir)
+    cfg.engine.profiles_dir = _resolve_data_path(cfg.engine.profiles_dir)
     Path(cfg.engine.media_dir).mkdir(parents=True, exist_ok=True)
     Path(cfg.engine.profiles_dir).mkdir(parents=True, exist_ok=True)
     Path(cfg.db_path).parent.mkdir(parents=True, exist_ok=True)

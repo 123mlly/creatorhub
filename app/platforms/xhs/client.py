@@ -3,7 +3,7 @@
 登录态(含 a1 / web_session 等 Cookie)来自浏览器扫码登录后的 storage_state。
 
 相比"浏览器拦截"方案:不依赖页面 JS 主动发请求,搜索/笔记/评论都稳定可控。
-小红书改版导致签名失效时,升级 xhshow 库即可(pip install -U xhshow)。
+小红书改版导致签名失效时,升级 xhshow 库即可(uv add --upgrade xhshow)。
 
 ⚠️ TLS 指纹:走 curl_cffi 的 impersonate,复刻真实 Chrome 的 JA3/HTTP2 指纹。
 纯 httpx 的 TLS 指纹与浏览器不同,容易被风控按"非浏览器客户端"识别;impersonate

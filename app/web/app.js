@@ -36,6 +36,17 @@ const api = async (path, opts) => {
   } finally { _apiActive--; _barSync(); }
 };
 
+// Docker / 无桌面：关闭扫码登录，仅保留 Cookie
+let QR_LOGIN_ENABLED = true;
+function applyQrLoginMode(enabled) {
+  QR_LOGIN_ENABLED = enabled !== false;
+  document.body.classList.toggle("no-qr", !QR_LOGIN_ENABLED);
+}
+function guardQrLogin(action) {
+  if (QR_LOGIN_ENABLED) return action();
+  toast("Docker 模式已禁用扫码登录，请使用 Cookie 粘贴", "err");
+}
+
 // ─── UI helpers ───
 const ic = (id) => `<svg aria-hidden="true"><use href="#${id}"/></svg>`;
 // 按钮加载态:换成 spinner+label,返回 restore()。配合 INFLIGHT 暂停轮询,加载态不会被重渲染冲掉。
@@ -365,16 +376,24 @@ async function refreshOverviewChart() {
 
 // ─── 平台切换(抖音 / 小红书) ───
 let PLATFORM = "douyin";
-const PF_NAME = { douyin: "抖音", xhs: "小红书", kuaishou: "快手", shipinhao: "视频号" };
-// 是否支持「发布」面板(四平台均有)
-function pfHasPublish(pf) { return pf === "xhs" || pf === "kuaishou" || pf === "douyin" || pf === "shipinhao"; }
+const PF_NAME = { douyin: "抖音", xhs: "小红书", kuaishou: "快手", shipinhao: "视频号", youtube: "YouTube" };
+const PF_ALL = ["douyin", "xhs", "kuaishou", "shipinhao", "youtube"];
+// 是否支持「发布」面板
+function pfHasPublish(pf) { return pf === "xhs" || pf === "kuaishou" || pf === "douyin" || pf === "shipinhao" || pf === "youtube"; }
 // 视频号只有「本账号」数据(助手接口本账号),不支持监控他人作品/评论
 function pfIsChannels(pf) { return pf === "shipinhao"; }
+function pfIsYoutube(pf) { return pf === "youtube"; }
+// hub 子页:关注/粉丝/私信对视频号与 YouTube 均不可用
+function pfHubLite(pf) { return pfIsChannels(pf) || pfIsYoutube(pf); }
 function switchPlatform(pf) {
-  if (!["douyin", "xhs", "kuaishou", "shipinhao"].includes(pf)) pf = "douyin";
+  if (!PF_ALL.includes(pf)) pf = "douyin";
   PLATFORM = pf;
   CONTENT_SRC = CONTENT_GROUP = CONTENT_TAG = "";
+  CONTENT_PAGE = 1;
   COMMENT_SRC = COMMENT_GROUP = COMMENT_TAG = "";
+  COMMENT_PAGE = 1;
+  MON_PAGE = 1;
+  WATCH_PAGE = 1;
   if (OPEN_META_COMBO) OPEN_META_COMBO.close();
   ["t-group", "t-tags", "w-group", "w-tags"].forEach(id => setMetaValue(id, ""));
   ["mon-search", "watch-search"].forEach(id => { if ($(id)) $(id).value = ""; });
@@ -385,6 +404,7 @@ function switchPlatform(pf) {
   });
   try { localStorage.setItem("dym-pf", pf); } catch (e) {}
   applyPlatformUI();
+  closeNav();
   // 切换后立刻刷新该平台数据
   refreshAccounts(); refreshMonitors(); refreshContents(); refreshWatches(); refreshComments(); refreshOverviewChart();
   populateAcAccount(); onAcMode(); refreshCommentRules(); refreshCommentTasks();
@@ -395,6 +415,7 @@ function applyPlatformUI() {
   document.body.classList.toggle("pf-xhs", PLATFORM === "xhs");
   document.body.classList.toggle("pf-kuaishou", PLATFORM === "kuaishou");
   document.body.classList.toggle("pf-shipinhao", PLATFORM === "shipinhao");
+  document.body.classList.toggle("pf-youtube", PLATFORM === "youtube");
   // 视频号:只有本账号数据,隐藏「监控他人作品/评论」相关入口(.notsh-only)
   document.body.classList.toggle("pf-channels", pfIsChannels(PLATFORM));
   document.querySelectorAll(".pswitch button").forEach(b =>
@@ -403,27 +424,47 @@ function applyPlatformUI() {
   document.querySelectorAll(".xhs-only").forEach(e => e.classList.toggle("hidden", PLATFORM !== "xhs"));
   document.querySelectorAll(".ks-only").forEach(e => e.classList.toggle("hidden", PLATFORM !== "kuaishou"));
   document.querySelectorAll(".sh-only").forEach(e => e.classList.toggle("hidden", PLATFORM !== "shipinhao"));
-  document.querySelectorAll(".notsh-only").forEach(e => e.classList.toggle("hidden", pfIsChannels(PLATFORM)));
+  document.querySelectorAll(".yt-only").forEach(e => e.classList.toggle("hidden", PLATFORM !== "youtube"));
+  document.querySelectorAll(".dy-yt-only").forEach(e =>
+    e.classList.toggle("hidden", PLATFORM !== "douyin" && PLATFORM !== "youtube"));
+  document.querySelectorAll(".notsh-only").forEach(e => {
+    const hide = pfIsChannels(PLATFORM)
+      || (pfIsYoutube(PLATFORM) && e.classList.contains("no-yt-only"));
+    e.classList.toggle("hidden", hide);
+  });
+  document.querySelectorAll(".no-yt-only").forEach(e => {
+    if (e.classList.contains("notsh-only")) return; // 已由上方合并处理
+    e.classList.toggle("hidden", pfIsYoutube(PLATFORM));
+  });
   document.querySelectorAll(".meta-scope").forEach(e => {
     e.textContent = (PF_NAME[PLATFORM] || "当前平台") + "内独立";
   });
-  // 发布面板入口:抖音 / 小红书 / 快手均显示
+  // 发布面板入口:抖音 / 小红书 / 快手 / 视频号
   document.querySelectorAll(".pub-only").forEach(e => e.classList.toggle("hidden", !pfHasPublish(PLATFORM)));
   // 发布面板文案随平台切换
-  const ks = PLATFORM === "kuaishou", dy = PLATFORM === "douyin", sph = PLATFORM === "shipinhao";
+  const ks = PLATFORM === "kuaishou", dy = PLATFORM === "douyin", sph = PLATFORM === "shipinhao", yt = PLATFORM === "youtube";
   const pubSub = $("pub-head-sub");
   if (pubSub) pubSub.textContent = dy ? "上传图集 / 视频到抖音创作平台(实验性)"
     : ks ? "上传图集 / 视频到快手创作平台(实验性)"
-    : sph ? "上传视频到视频号助手(实验性)" : "上传图集 / 视频到小红书(实验性)";
-  if ($("pub-head-lead")) $("pub-head-lead").textContent = (ks || dy || sph) ? "发布作品" : "发布笔记";
-  if ($("pub-title")) $("pub-title").placeholder = (ks || dy || sph) ? "给作品起个标题" : "给笔记起个标题";
+    : sph ? "上传视频到视频号助手(实验性)"
+    : yt ? "上传视频到 YouTube Studio(实验性)" : "上传图集 / 视频到小红书(实验性)";
+  if ($("pub-head-lead")) $("pub-head-lead").textContent = (ks || dy || sph || yt) ? "发布作品" : "发布笔记";
+  if ($("pub-title")) $("pub-title").placeholder = yt ? "视频标题(最多 100 字)"
+    : (ks || dy || sph) ? "给作品起个标题" : "给笔记起个标题";
   if ($("pub-hint")) $("pub-hint").textContent = dy
     ? "发布通过自动化抖音创作平台(creator.douyin.com)完成,会弹出浏览器窗口。首次或触发风控时抖音会要求「短信验证码/扫码」验证,请在弹出窗口里手动完成(最多等 5 分钟,验证通过后自动继续发布);视频上传后需等转码,发布稍慢。⚠️ 因需本人验证,定时/无人值守发布可能被此步骤挡住,建议发布时在场。"
     : ks
     ? "发布通过自动化快手创作平台(cp.kuaishou.com)完成,会弹出浏览器窗口;若遇验证码/需补封面可在窗口里手动处理。定时任务由后台引擎到点执行。"
     : sph
     ? "发布通过自动化视频号助手(channels.weixin.qq.com)完成,会弹出浏览器窗口。视频号视频上传需转码、发布前可能要求封面/实名/过脸验证,请在弹出窗口里手动处理(建议发布时在场)。⚠️ 发布页在 wujie 微前端里,选择器随视频号改版可能失效。"
+    : yt
+    ? "发布通过自动化 YouTube Studio(studio.youtube.com)完成,会弹出浏览器窗口。仅支持视频;上传后需走完详情→可见性步骤并点 Publish。遇验证码/频道未创建/需补缩略图请在窗口里手动处理(建议发布时在场)。⚠️ Studio 改版可能导致选择器失效。"
     : "发布通过自动化小红书创作平台完成,会弹出浏览器窗口;若遇验证码/需补封面可在窗口里手动处理。定时任务由后台引擎到点执行。";
+  // YouTube 仅视频:强制类型并隐藏图集选项交互
+  if (yt && $("pub-type")) {
+    $("pub-type").value = "video";
+    onPubType();
+  }
   // 评论监控「类型」下拉随平台改写文案
   const wk = $("w-kind");
   if (wk) {
@@ -445,10 +486,13 @@ function applyPlatformUI() {
   const ckl = $("ck-label");
   if (ckl) ckl.textContent = PLATFORM === "xhs"
     ? "完整 Cookie(含 a1;发布需创作者会话)"
-    : PLATFORM === "kuaishou" ? "完整 Cookie(含 userId 与 web_st)" : "完整 Cookie(含 sessionid)";
+    : PLATFORM === "kuaishou" ? "完整 Cookie(含 userId 与 web_st)"
+    : PLATFORM === "youtube" ? "完整 Cookie(含 YouTube / Google 登录 Cookie)"
+    : "完整 Cookie(含 sessionid)";
   if ($("ck-val")) $("ck-val").placeholder = PLATFORM === "xhs"
     ? "从 creator.xiaohongshu.com 登录后复制完整 Cookie"
     : PLATFORM === "kuaishou" ? "从 www.kuaishou.com 登录后复制完整 Cookie"
+    : PLATFORM === "youtube" ? "从 youtube.com 登录后复制完整 Cookie(含 SID / LOGIN_INFO 等)"
     : "从浏览器开发者工具复制完整 Cookie";
   applyMonitorForm();
   if ($("t-kind") && PLATFORM !== "xhs") $("t-kind").value = "creator";
@@ -456,10 +500,17 @@ function applyPlatformUI() {
   if (pfIsChannels(PLATFORM)) {
     const cur = (document.querySelector('.navitem.active') || {}).dataset;
     if (cur && ["monitors", "comments", "autocomment"].includes(cur.tab)) switchTab("hub");
-    // 视频号本账号只有「我的作品 / 数据」;若停在关注/粉丝/私信子页,切回我的作品
-    if (["following", "fans", "dm"].includes(HUB_TAB)) switchHubTab("myworks");
   }
-  // 不支持发布的平台:若正停在该面板则回到总览(当前四平台均支持,兜底保留)
+  // YouTube:无评论/自动评论,停在这些面板时切到账号管理
+  if (pfIsYoutube(PLATFORM)) {
+    const cur = (document.querySelector('.navitem.active') || {}).dataset;
+    if (cur && ["comments", "autocomment"].includes(cur.tab)) switchTab("hub");
+  }
+  // 视频号 / YouTube hub 只有「我的作品 / 数据」
+  if (pfHubLite(PLATFORM) && ["following", "fans", "dm"].includes(HUB_TAB)) {
+    switchHubTab("myworks");
+  }
+  // 不支持发布的平台:若正停在该面板则回到总览
   if (!pfHasPublish(PLATFORM)) {
     const pub = document.querySelector('[data-panel="publish"]');
     if (pub && pub.style.display !== "none") switchTab("overview");
@@ -469,6 +520,12 @@ function applyPlatformUI() {
 function applyMonitorForm() {
   const title = $("mon-add-title");
   const lbl = $("t-url-label");
+  if (PLATFORM === "youtube") {
+    if (title) title.innerHTML = '添加频道监控 <span class="sub">监控并下载新视频(yt-dlp)</span>';
+    if (lbl) lbl.textContent = "频道链接 / @handle / 频道 ID";
+    $("t-url").placeholder = "粘贴 youtube.com/@xxx、/channel/UCxxx 或 @handle";
+    return;
+  }
   if (PLATFORM === "douyin" || PLATFORM === "kuaishou") {
     const isKs = PLATFORM === "kuaishou";
     if (title) title.innerHTML = (isKs ? '添加创作者监控' : '添加作品监控')
@@ -492,12 +549,28 @@ function applyMonitorForm() {
 }
 
 // ─── 标签页切换 ───
+function toggleNav(force) {
+  const open = force === undefined ? !document.body.classList.contains("nav-open") : !!force;
+  document.body.classList.toggle("nav-open", open);
+  const btn = $("nav-toggle");
+  const backdrop = $("nav-backdrop");
+  if (btn) {
+    btn.setAttribute("aria-expanded", open ? "true" : "false");
+    btn.setAttribute("aria-label", open ? "关闭菜单" : "打开菜单");
+  }
+  if (backdrop) {
+    if (open) backdrop.removeAttribute("hidden");
+    else backdrop.setAttribute("hidden", "");
+  }
+}
+function closeNav() { toggleNav(false); }
 function switchTab(name) {
   document.querySelectorAll("[data-panel]").forEach(p => { p.style.display = p.dataset.panel === name ? "" : "none"; });
   document.querySelectorAll(".navitem").forEach(t => {
     t.classList.toggle("active", t.dataset.tab === name);
   });
   try { localStorage.setItem("dym-tab", name); } catch (e) {}
+  closeNav();
   if (name === "hub") { refreshHubSummary(); refreshHubPanel(); }
   else stopDmStream();   // 离开本账号管理即断开私信实时流
   if (name === "share-download") {
@@ -538,6 +611,7 @@ function loginStartUrl(path, proxy) {
   return path + "?proxy=" + encodeURIComponent(proxy);
 }
 async function startLogin() {
+  return guardQrLogin(async () => {
   const proxy = await choosePreLoginProxy();
   if (proxy === null) return;
   $("cookiebox").style.display = "none";
@@ -548,6 +622,7 @@ async function startLogin() {
     $("qrstatus").innerHTML = "🪟 已弹出浏览器窗口,请在<b>那个窗口</b>里点击「登录」并用抖音 App 扫码。<br>完成后这里会自动刷新。";
     pollLogin(res.task_id);
   } catch (e) { $("qrstatus").textContent = "启动失败: " + e.message; toast("登录启动失败:" + e.message, "err"); }
+  });
 }
 function pollLogin(tid) {
   clearInterval(qrTimer);
@@ -591,6 +666,7 @@ function pollLogin(tid) {
 
 // ─── 创作者登录(自有账号评论模式用) ───
 async function startCreatorLogin() {
+  if (!QR_LOGIN_ENABLED) return toast("Docker 模式已禁用扫码登录，请使用 Cookie 粘贴", "err");
   const proxy = await choosePreLoginProxy();
   if (proxy === null) return;
   $("cookiebox").style.display = "none";
@@ -605,6 +681,7 @@ async function startCreatorLogin() {
 
 // ─── 小红书扫码登录 ───
 async function startXhsLogin() {
+  if (!QR_LOGIN_ENABLED) return toast("Docker 模式已禁用扫码登录，请使用 Cookie 粘贴", "err");
   const proxy = await choosePreLoginProxy();
   if (proxy === null) return;
   $("cookiebox").style.display = "none";
@@ -619,6 +696,7 @@ async function startXhsLogin() {
 
 // ─── 小红书创作者登录(发布用) ───
 async function startXhsCreatorLogin() {
+  if (!QR_LOGIN_ENABLED) return toast("Docker 模式已禁用扫码登录，请使用 Cookie 粘贴", "err");
   const proxy = await choosePreLoginProxy();
   if (proxy === null) return;
   $("cookiebox").style.display = "none";
@@ -633,6 +711,7 @@ async function startXhsCreatorLogin() {
 
 // ─── 快手扫码登录 ───
 async function startKsLogin() {
+  if (!QR_LOGIN_ENABLED) return toast("Docker 模式已禁用扫码登录，请使用 Cookie 粘贴", "err");
   const proxy = await choosePreLoginProxy();
   if (proxy === null) return;
   $("cookiebox").style.display = "none";
@@ -647,6 +726,7 @@ async function startKsLogin() {
 
 // ─── 快手创作者登录(发布用) ───
 async function startKsCreatorLogin() {
+  if (!QR_LOGIN_ENABLED) return toast("Docker 模式已禁用扫码登录，请使用 Cookie 粘贴", "err");
   const proxy = await choosePreLoginProxy();
   if (proxy === null) return;
   $("cookiebox").style.display = "none";
@@ -661,6 +741,7 @@ async function startKsCreatorLogin() {
 
 // ─── 视频号扫码登录(读取/发布共用,微信扫码) ───
 async function startChannelsLogin() {
+  if (!QR_LOGIN_ENABLED) return toast("Docker 模式已禁用扫码登录，请使用 Cookie 粘贴", "err");
   const proxy = await choosePreLoginProxy();
   if (proxy === null) return;
   $("cookiebox").style.display = "none";
@@ -671,6 +752,21 @@ async function startChannelsLogin() {
     $("qrstatus").innerHTML = "🪟 已弹出<b>视频号助手</b>窗口(channels.weixin.qq.com),请用<b>微信</b>扫码登录(读取/发布共用一套登录态)。<br>登录成功后稍等一两秒再关窗口。";
     pollLogin(res.task_id);
   } catch (e) { $("qrstatus").textContent = "启动失败: " + e.message; toast("视频号登录启动失败:" + e.message, "err"); }
+}
+
+// ─── YouTube 浏览器登录(Google 账号) ───
+async function startYoutubeLogin() {
+  if (!QR_LOGIN_ENABLED) return toast("Docker 模式已禁用扫码登录，请使用 Cookie 粘贴", "err");
+  const proxy = await choosePreLoginProxy();
+  if (proxy === null) return;
+  $("cookiebox").style.display = "none";
+  $("qrbox").style.display = "block";
+  $("qrstatus").textContent = "正在打开 YouTube 窗口…";
+  try {
+    const res = await api(loginStartUrl("/api/login/youtube/start", proxy), { method: "POST" });
+    $("qrstatus").innerHTML = "🪟 已弹出 <b>YouTube</b> 窗口,请在其中完成 <b>Google 登录</b>(可用于年龄限制/会员内容下载)。<br>登录成功后稍等一两秒再关窗口,这里会自动刷新。";
+    pollLogin(res.task_id);
+  } catch (e) { $("qrstatus").textContent = "启动失败: " + e.message; toast("YouTube 登录启动失败:" + e.message, "err"); }
 }
 
 // ─── Cookie 登录 ───
@@ -697,7 +793,11 @@ async function saveCookie() {
 let ACCOUNTS = [];
 let MONITORS = [], WATCHES = [], CONTENTS = [];
 let CONTENT_SRC = "", CONTENT_GROUP = "", CONTENT_TAG = "";
+let CONTENT_PAGE = 1, CONTENT_PAGE_SIZE = 10, CONTENT_TOTAL = 0;
 let COMMENT_SRC = "", COMMENT_GROUP = "", COMMENT_TAG = "";
+let COMMENT_PAGE = 1, COMMENT_PAGE_SIZE = 10, COMMENT_TOTAL = 0;
+let MON_PAGE = 1, MON_PAGE_SIZE = 10, MON_TOTAL = 0;
+let WATCH_PAGE = 1, WATCH_PAGE_SIZE = 10, WATCH_TOTAL = 0;
 function parseTags(raw) {
   const seen = new Set();
   return String(raw || "").split(/[,，、;；\s]+/).map(x => x.trim()).filter(x => {
@@ -990,21 +1090,194 @@ function populateCommentSrc() {
   sel.value = COMMENT_SRC;
   if (sel._csSync) sel._csSync();
 }
-function onContentSrc() { CONTENT_SRC = $("content-src").value; selContent.clear(); refreshContents(); }
-function onCommentSrc() { COMMENT_SRC = $("comment-src").value; selComment.clear(); refreshComments(); }
+function onContentSrc() { CONTENT_SRC = $("content-src").value; CONTENT_PAGE = 1; selContent.clear(); refreshContents(); }
+function onCommentSrc() { COMMENT_SRC = $("comment-src").value; COMMENT_PAGE = 1; selComment.clear(); refreshComments(); }
 function onContentMetaFilter() {
   CONTENT_GROUP = $("content-group").value; CONTENT_TAG = $("content-tag").value;
-  selContent.clear(); refreshContents();
+  CONTENT_PAGE = 1; selContent.clear(); refreshContents();
 }
 function onCommentMetaFilter() {
   COMMENT_GROUP = $("comment-group").value; COMMENT_TAG = $("comment-tag").value;
-  selComment.clear(); refreshComments();
+  COMMENT_PAGE = 1; selComment.clear(); refreshComments();
+}
+function onCommentPageSize() {
+  const sel = $("comment-page-size");
+  COMMENT_PAGE_SIZE = Math.max(10, Math.min(200, +(sel && sel.value) || 10));
+  COMMENT_PAGE = 1;
+  refreshComments();
+}
+function onContentPageSize() {
+  const sel = $("content-page-size");
+  CONTENT_PAGE_SIZE = Math.max(10, Math.min(200, +(sel && sel.value) || 10));
+  CONTENT_PAGE = 1;
+  refreshContents();
+}
+function contentPrevPage() {
+  if (CONTENT_PAGE <= 1) return;
+  CONTENT_PAGE -= 1;
+  refreshContents();
+}
+function contentNextPage() {
+  const pages = Math.max(1, Math.ceil(CONTENT_TOTAL / CONTENT_PAGE_SIZE));
+  if (CONTENT_PAGE >= pages) return;
+  CONTENT_PAGE += 1;
+  refreshContents();
+}
+function renderContentPager() {
+  const pager = $("content-pager");
+  if (!pager) return;
+  const pages = Math.max(1, Math.ceil(CONTENT_TOTAL / CONTENT_PAGE_SIZE) || 1);
+  if (CONTENT_PAGE > pages) CONTENT_PAGE = pages;
+  pager.hidden = CONTENT_TOTAL <= 0;
+  const info = $("content-page-info");
+  const num = $("content-page-num");
+  const prev = $("content-prev");
+  const next = $("content-next");
+  const sizeSel = $("content-page-size");
+  if (info) {
+    const from = CONTENT_TOTAL ? (CONTENT_PAGE - 1) * CONTENT_PAGE_SIZE + 1 : 0;
+    const to = Math.min(CONTENT_PAGE * CONTENT_PAGE_SIZE, CONTENT_TOTAL);
+    info.textContent = CONTENT_TOTAL
+      ? `共 ${CONTENT_TOTAL} 条 · 显示 ${from}–${to}`
+      : "共 0 条";
+  }
+  if (num) num.textContent = `${CONTENT_PAGE} / ${pages}`;
+  if (prev) prev.disabled = CONTENT_PAGE <= 1;
+  if (next) next.disabled = CONTENT_PAGE >= pages;
+  if (sizeSel && String(CONTENT_PAGE_SIZE) !== sizeSel.value) {
+    sizeSel.value = String(CONTENT_PAGE_SIZE);
+    if (sizeSel._csSync) sizeSel._csSync();
+  }
+}
+function commentPrevPage() {
+  if (COMMENT_PAGE <= 1) return;
+  COMMENT_PAGE -= 1;
+  refreshComments();
+}
+function commentNextPage() {
+  const pages = Math.max(1, Math.ceil(COMMENT_TOTAL / COMMENT_PAGE_SIZE));
+  if (COMMENT_PAGE >= pages) return;
+  COMMENT_PAGE += 1;
+  refreshComments();
+}
+function renderCommentPager() {
+  const pager = $("comment-pager");
+  if (!pager) return;
+  const pages = Math.max(1, Math.ceil(COMMENT_TOTAL / COMMENT_PAGE_SIZE) || 1);
+  if (COMMENT_PAGE > pages) COMMENT_PAGE = pages;
+  const show = COMMENT_TOTAL > 0;
+  pager.hidden = !show;
+  const info = $("comment-page-info");
+  const num = $("comment-page-num");
+  const prev = $("comment-prev");
+  const next = $("comment-next");
+  const sizeSel = $("comment-page-size");
+  if (info) {
+    const from = COMMENT_TOTAL ? (COMMENT_PAGE - 1) * COMMENT_PAGE_SIZE + 1 : 0;
+    const to = Math.min(COMMENT_PAGE * COMMENT_PAGE_SIZE, COMMENT_TOTAL);
+    info.textContent = COMMENT_TOTAL
+      ? `共 ${COMMENT_TOTAL} 条 · 显示 ${from}–${to}`
+      : "共 0 条";
+  }
+  if (num) num.textContent = `${COMMENT_PAGE} / ${pages}`;
+  if (prev) prev.disabled = COMMENT_PAGE <= 1;
+  if (next) next.disabled = COMMENT_PAGE >= pages;
+  if (sizeSel && String(COMMENT_PAGE_SIZE) !== sizeSel.value) {
+    sizeSel.value = String(COMMENT_PAGE_SIZE);
+    if (sizeSel._csSync) sizeSel._csSync();
+  }
 }
 function matchesMeta(item, groupName, tag) {
   return (!groupName || item.group_name === groupName) && (!tag || itemTags(item).includes(tag));
 }
-function onMonitorFilter() { renderMonitorRows(); }
-function onWatchFilter() { renderWatchRows(); }
+function onMonitorFilter() { MON_PAGE = 1; renderMonitorRows(); }
+function onWatchFilter() { WATCH_PAGE = 1; renderWatchRows(); }
+function onMonPageSize() {
+  const sel = $("mon-page-size");
+  MON_PAGE_SIZE = Math.max(10, Math.min(200, +(sel && sel.value) || 10));
+  MON_PAGE = 1;
+  renderMonitorRows();
+}
+function onWatchPageSize() {
+  const sel = $("watch-page-size");
+  WATCH_PAGE_SIZE = Math.max(10, Math.min(200, +(sel && sel.value) || 10));
+  WATCH_PAGE = 1;
+  renderWatchRows();
+}
+function monPrevPage() {
+  if (MON_PAGE <= 1) return;
+  MON_PAGE -= 1;
+  renderMonitorRows();
+}
+function monNextPage() {
+  const pages = Math.max(1, Math.ceil(MON_TOTAL / MON_PAGE_SIZE));
+  if (MON_PAGE >= pages) return;
+  MON_PAGE += 1;
+  renderMonitorRows();
+}
+function watchPrevPage() {
+  if (WATCH_PAGE <= 1) return;
+  WATCH_PAGE -= 1;
+  renderWatchRows();
+}
+function watchNextPage() {
+  const pages = Math.max(1, Math.ceil(WATCH_TOTAL / WATCH_PAGE_SIZE));
+  if (WATCH_PAGE >= pages) return;
+  WATCH_PAGE += 1;
+  renderWatchRows();
+}
+function renderMonPager() {
+  const pager = $("mon-pager");
+  if (!pager) return;
+  const pages = Math.max(1, Math.ceil(MON_TOTAL / MON_PAGE_SIZE) || 1);
+  if (MON_PAGE > pages) MON_PAGE = pages;
+  pager.hidden = MON_TOTAL <= 0;
+  const info = $("mon-page-info");
+  const num = $("mon-page-num");
+  const prev = $("mon-prev");
+  const next = $("mon-next");
+  const sizeSel = $("mon-page-size");
+  if (info) {
+    const from = MON_TOTAL ? (MON_PAGE - 1) * MON_PAGE_SIZE + 1 : 0;
+    const to = Math.min(MON_PAGE * MON_PAGE_SIZE, MON_TOTAL);
+    info.textContent = MON_TOTAL
+      ? `共 ${MON_TOTAL} 条 · 显示 ${from}–${to}`
+      : "共 0 条";
+  }
+  if (num) num.textContent = `${MON_PAGE} / ${pages}`;
+  if (prev) prev.disabled = MON_PAGE <= 1;
+  if (next) next.disabled = MON_PAGE >= pages;
+  if (sizeSel && String(MON_PAGE_SIZE) !== sizeSel.value) {
+    sizeSel.value = String(MON_PAGE_SIZE);
+    if (sizeSel._csSync) sizeSel._csSync();
+  }
+}
+function renderWatchPager() {
+  const pager = $("watch-pager");
+  if (!pager) return;
+  const pages = Math.max(1, Math.ceil(WATCH_TOTAL / WATCH_PAGE_SIZE) || 1);
+  if (WATCH_PAGE > pages) WATCH_PAGE = pages;
+  pager.hidden = WATCH_TOTAL <= 0;
+  const info = $("watch-page-info");
+  const num = $("watch-page-num");
+  const prev = $("watch-prev");
+  const next = $("watch-next");
+  const sizeSel = $("watch-page-size");
+  if (info) {
+    const from = WATCH_TOTAL ? (WATCH_PAGE - 1) * WATCH_PAGE_SIZE + 1 : 0;
+    const to = Math.min(WATCH_PAGE * WATCH_PAGE_SIZE, WATCH_TOTAL);
+    info.textContent = WATCH_TOTAL
+      ? `共 ${WATCH_TOTAL} 条 · 显示 ${from}–${to}`
+      : "共 0 条";
+  }
+  if (num) num.textContent = `${WATCH_PAGE} / ${pages}`;
+  if (prev) prev.disabled = WATCH_PAGE <= 1;
+  if (next) next.disabled = WATCH_PAGE >= pages;
+  if (sizeSel && String(WATCH_PAGE_SIZE) !== sizeSel.value) {
+    sizeSel.value = String(WATCH_PAGE_SIZE);
+    if (sizeSel._csSync) sizeSel._csSync();
+  }
+}
 async function refreshAccounts() {
   const accs = await api("/api/accounts?platform=" + PLATFORM);
   ACCOUNTS = accs;
@@ -1055,17 +1328,17 @@ async function refreshAccounts() {
       <td><span class="pill ${a.status}">${a.status === "invalid" ? "登录失效" : "正常"}</span></td>
       <td class="acttd">
         ${a.status === "invalid"
-          ? `<button class="sm" style="background:var(--warn);border-color:transparent;color:#1a1a1a" onclick="relogin(${a.id})">重新登录</button>`
-          : `<button class="ghost sm" onclick="relogin(${a.id})" title="${isXhs ? "重登可升级创作平台授权(发布需要)" : "重新扫码登录"}">重新登录</button>`}
+          ? `<button class="sm" style="background:var(--warn);border-color:transparent;color:#1a1a1a" onclick="relogin(${a.id})">${QR_LOGIN_ENABLED ? "重新登录" : "更新 Cookie"}</button>`
+          : `<button class="ghost sm" onclick="relogin(${a.id})" title="${QR_LOGIN_ENABLED ? (isXhs ? "重登可升级创作平台授权(发布需要)" : "重新扫码登录") : "Docker 模式请粘贴 Cookie 更新"}">${QR_LOGIN_ENABLED ? "重新登录" : "更新 Cookie"}</button>`}
         <button class="ghost sm" onclick="refreshProfile(${a.id})">刷新资料</button>
         <button class="ghost sm" onclick="openAccountHub(${a.id})" title="查看该账号的作品 / 关注 / 粉丝 / 私信">数据</button>
-        <button class="ghost sm" onclick="openAccountBrowser(${a.id})" title="用该账号登录态弹出真实浏览器窗口,手动收发私信 / 维护 / 抓接口(关窗即保存)">打开浏览器</button>
+        ${QR_LOGIN_ENABLED ? `<button class="ghost sm" onclick="openAccountBrowser(${a.id})" title="用该账号登录态弹出真实浏览器窗口,手动收发私信 / 维护 / 抓接口(关窗即保存)">打开浏览器</button>` : ""}
         <button class="ghost sm" onclick="setProxy(${a.id})" title="设置/分配该账号专属代理(防多账号关联)">代理</button>
         ${a.has_proxy ? `<button class="ghost sm" onclick="testProxy(${a.id})" title="经该代理实连一次,验证可用">测代理</button>` : ""}
         <button class="ghost sm" onclick="delAccount(${a.id})" aria-label="删除账号">删除</button>
       </td>
     </tr>`;
-  }).join("") || empty(3, "还没有账号", "i-user", "用上方按钮扫码登录,或粘贴 Cookie 添加一个账号");
+  }).join("") || empty(3, "还没有账号", "i-user", QR_LOGIN_ENABLED ? "用上方按钮扫码登录,或粘贴 Cookie 添加一个账号" : "Docker 模式请用上方「Cookie 粘贴」添加账号");
   if ($("tb-acc")) $("tb-acc").textContent = accs.length;
   populateAccountSelect();
   populateWatchAccount();
@@ -1217,6 +1490,7 @@ function workLink(platform, id) {
   if (platform === "xhs") return "https://www.xiaohongshu.com/explore/" + id;
   if (platform === "kuaishou") return "https://www.kuaishou.com/short-video/" + id;
   if (platform === "shipinhao") return "https://channels.weixin.qq.com/platform/post/list";
+  if (platform === "youtube") return "https://www.youtube.com/watch?v=" + id;
   return "https://www.douyin.com/video/" + id;
 }
 function openWork(platform, id) { try { window.open(workLink(platform, id), "_blank", "noopener"); } catch (e) {} }
@@ -1485,7 +1759,7 @@ function accOptions(list, ph) {
 }
 function populateAccountSelect() {
   const sel = $("t-acc"); if (!sel) return;
-  const required = PLATFORM === "xhs" || PLATFORM === "douyin";
+  const required = PLATFORM === "xhs" || PLATFORM === "douyin" || PLATFORM === "youtube";
   const platformName = PLATFORM === "xhs" ? "小红书" : "抖音";
   sel.innerHTML = accOptions(ACCOUNTS, required ? `请选择${platformName}账号(必选)` : "不指定账号");
   // 抖音匿名主页可能返回风控后的旧快照；作品监控与小红书一样必须使用登录态。
@@ -1705,6 +1979,11 @@ async function testProxy(id) {
   finally { btn.disabled = false; btn.textContent = old; refreshAccounts(); }
 }
 async function relogin(id) {
+  if (!QR_LOGIN_ENABLED) {
+    toast("Docker 模式请用 Cookie 粘贴更新登录态", "err");
+    toggleCookie();
+    return;
+  }
   const btn = evtBtn();
   await withBusy(btn, "启动中", async () => {
     try {
@@ -1755,6 +2034,7 @@ async function delAccount(id) {
 async function loadSettings() {
   try {
     const s = await api("/api/settings");
+    applyQrLoginMode(s.qr_login_enabled !== false);
     $("dl-dir").value = s.download_dir || "";
     $("dl-quality").value = s.video_quality || "highest";
     if ($("ai-enabled")) {
@@ -1847,7 +2127,7 @@ function filterShareAccounts() {
   const old = sel.value;
   const platform = shareAccountPlatform();
   const hasDetectedLink = !!SHARE_LINKS.length;
-  const knownAccountPlatform = ["douyin", "xhs", "kuaishou", "shipinhao"].includes(platform);
+  const knownAccountPlatform = ["douyin", "xhs", "kuaishou", "shipinhao", "youtube"].includes(platform);
   const rows = knownAccountPlatform
     ? SHARE_ACCOUNTS.filter(a => a.platform === platform)
     : [];
@@ -2164,8 +2444,8 @@ async function addMonitor() {
   const url_or_secuid = $("t-url").value.trim();
   const target_kind = (PLATFORM === "xhs" && $("t-kind")) ? $("t-kind").value : "creator";
   if (!url_or_secuid) { toast(target_kind === "keyword" ? "请输入搜索关键词" : "请输入主页链接 / 短链 / id", "err"); return; }
-  if ((PLATFORM === "xhs" || PLATFORM === "douyin") && !$("t-acc").value) {
-    const platformName = PLATFORM === "xhs" ? "小红书" : "抖音";
+  if ((PLATFORM === "xhs" || PLATFORM === "douyin" || PLATFORM === "youtube") && !$("t-acc").value) {
+    const platformName = PLATFORM === "xhs" ? "小红书" : PLATFORM === "youtube" ? "YouTube" : "抖音";
     if (!ACCOUNTS.length) { toast(`请先在「账号」里完成${platformName}扫码登录`, "err"); switchTab("accounts"); return; }
     toast(`${platformName}监控必须选择一个已登录账号`, "err"); return;
   }
@@ -2179,7 +2459,7 @@ async function addMonitor() {
           url_or_secuid, platform: PLATFORM, target_kind,
           account_id: $("t-acc").value ? +$("t-acc").value : null,
           interval_seconds: +$("t-interval").value,
-          initial_backfill_count: PLATFORM === "douyin" ? +$("t-backfill").value : 0,
+          initial_backfill_count: (PLATFORM === "douyin" || PLATFORM === "youtube") ? +$("t-backfill").value : 0,
           download_dir: $("t-dir").value.trim(),
           video_quality: PLATFORM === "xhs" ? "" : $("t-quality").value,
           alias: $("t-alias").value.trim(), group_name: getMetaValue("t-group").trim(),
@@ -2238,15 +2518,15 @@ function monRow(t) {
     ? `<button class="ghost sm" onclick="bindAccount(${t.id})">换账号</button>`
     : `<button class="sm" style="background:var(--warn);border-color:transparent;color:#1a1a1a" onclick="bindAccount(${t.id})">绑定账号</button>`;
   return `<tr>
-    <td><div class="user-cell">${t.avatar ? `<img class="avatar" src="${t.avatar}" alt="" referrerpolicy="no-referrer">` : ""}<div><span>${label}</span>${t.alias ? `<div class="alias-line">${esc(t.alias)}</div>` : ""}${accTag}</div></div></td>
-    <td>${metaChips(t)}</td>
-    <td class="num">${t.content_count}</td>
-    <td class="num">${Math.round(t.interval_seconds / 60)} 分</td>
-    <td class="wrap" style="max-width:230px">
+    <td class="card-main"><div class="user-cell">${t.avatar ? `<img class="avatar" src="${t.avatar}" alt="" referrerpolicy="no-referrer">` : ""}<div><span>${label}</span>${t.alias ? `<div class="alias-line">${esc(t.alias)}</div>` : ""}${accTag}</div></div></td>
+    <td data-label="分组">${metaChips(t)}</td>
+    <td data-label="作品" class="num">${t.content_count}</td>
+    <td data-label="间隔" class="num">${Math.round(t.interval_seconds / 60)} 分</td>
+    <td data-label="下载" class="wrap" style="max-width:none">
       ${t.platform === "xhs" ? "" : `<span class="pill q bare">${QMAP[t.video_quality] || "默认"}</span> `}
-      <span class="mut" title="${esc(t.download_dir || "默认目录")}" style="display:inline-block;max-width:170px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:middle">${esc(t.download_dir || "默认")}</span></td>
-    <td class="mut">${t.last_scan_at ? new Date(t.last_scan_at + "Z").toLocaleString() : "—"}${t.last_error ? ` <span class="warn-ic" title="${esc(t.last_error)}">${ic("i-info")}</span>` : ""}</td>
-    <td><span class="pill ${t.enabled ? "active" : "invalid"}">${t.enabled ? "监控中" : "已暂停"}</span></td>
+      <span class="mut" title="${esc(t.download_dir || "默认目录")}" style="display:inline-block;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:middle">${esc(t.download_dir || "默认")}</span></td>
+    <td data-label="扫描" class="mut">${t.last_scan_at ? new Date(t.last_scan_at + "Z").toLocaleString() : "—"}${t.last_error ? ` <span class="warn-ic" title="${esc(t.last_error)}">${ic("i-info")}</span>` : ""}</td>
+    <td data-label="状态"><span class="pill ${t.enabled ? "active" : "invalid"}">${t.enabled ? "监控中" : "已暂停"}</span></td>
     <td class="acttd">
       <button class="ghost sm" onclick="runNow(${t.id})">立即抓取</button>
       <button class="ghost sm" onclick="editDir(${t.id}, ${JSON.stringify(t.download_dir || "").replace(/"/g, "&quot;")})">目录</button>
@@ -2262,15 +2542,25 @@ function renderMonitorRows() {
   const groupName = $("mon-group") ? $("mon-group").value : "";
   const tag = $("mon-tag") ? $("mon-tag").value : "";
   const query = (($("mon-search") && $("mon-search").value) || "").trim().toLocaleLowerCase();
-  const rows = MONITORS.filter(t => {
+  const filtered = MONITORS.filter(t => {
     if (!matchesMeta(t, groupName, tag)) return false;
     if (!query) return true;
     return [monitorBaseName(t), t.alias, t.group_name, ...itemTags(t)]
       .join(" ").toLocaleLowerCase().includes(query);
   });
-  if ($("mon-filter-count")) $("mon-filter-count").textContent = `显示 ${rows.length} / ${MONITORS.length}`;
+  MON_TOTAL = filtered.length;
+  const pages = Math.max(1, Math.ceil(MON_TOTAL / MON_PAGE_SIZE) || 1);
+  if (MON_TOTAL > 0 && MON_PAGE > pages) MON_PAGE = pages;
+  const start = (MON_PAGE - 1) * MON_PAGE_SIZE;
+  const rows = filtered.slice(start, start + MON_PAGE_SIZE);
+  if ($("mon-filter-count")) {
+    $("mon-filter-count").textContent = MON_TOTAL === MONITORS.length
+      ? `共 ${MONITORS.length} 条`
+      : `匹配 ${MON_TOTAL} / ${MONITORS.length}`;
+  }
   $("mon-table").innerHTML = rows.map(monRow).join("")
     || empty(8, "没有匹配的监控", "i-target", MONITORS.length ? "调整分组、标签或搜索条件" : "在上方添加一个作品监控");
+  renderMonPager();
 }
 async function bindAccount(id) {
   const pName = PLATFORM === "xhs" ? "小红书" : "抖音";
@@ -2445,13 +2735,27 @@ function noteCard(r) {
   </div>`;
 }
 async function refreshContents() {
-  const params = new URLSearchParams({ limit: "60", platform: PLATFORM });
+  const offset = Math.max(0, (CONTENT_PAGE - 1) * CONTENT_PAGE_SIZE);
+  const params = new URLSearchParams({
+    limit: String(CONTENT_PAGE_SIZE),
+    offset: String(offset),
+    platform: PLATFORM,
+  });
   if (CONTENT_SRC) params.set("target_id", CONTENT_SRC);
   if (CONTENT_GROUP) params.set("group_name", CONTENT_GROUP);
   if (CONTENT_TAG) params.set("tag", CONTENT_TAG);
-  const rows = await api("/api/contents?" + params.toString());
+  const data = await api("/api/contents?" + params.toString());
+  const rows = Array.isArray(data) ? data : (data.items || []);
+  CONTENT_TOTAL = Array.isArray(data) ? rows.length : (data.total || 0);
+  const pages = Math.max(1, Math.ceil(CONTENT_TOTAL / CONTENT_PAGE_SIZE) || 1);
+  if (CONTENT_TOTAL > 0 && CONTENT_PAGE > pages) {
+    CONTENT_PAGE = pages;
+    return refreshContents();
+  }
   CONTENTS = rows;
-  $("stat-dl").textContent = rows.filter(r => r.download_status === "done").length;
+  if (!CONTENT_SRC && !CONTENT_GROUP && !CONTENT_TAG) {
+    $("stat-dl").textContent = Array.isArray(data) ? rows.filter(r => r.download_status === "done").length : (data.done_total ?? rows.filter(r => r.download_status === "done").length);
+  }
   const xhs = PLATFORM === "xhs";
   $("content-title").textContent = xhs ? "最新笔记 / 下载状态" : "最新作品 / 下载状态";
   $("content-table-wrap").style.display = xhs ? "none" : "";
@@ -2460,6 +2764,7 @@ async function refreshContents() {
     $("content-cards").innerHTML = rows.map(noteCard).join("")
       || `<div class="empty" style="columns:1">${ic("i-image")}<div class="empty-t">暂无笔记</div></div>`;
     pruneSel(selContent, rows.map(r => r.id)); updateContentSelBar();
+    renderContentPager();
     return;
   }
   $("content-table").innerHTML = rows.map(r => {
@@ -2488,6 +2793,7 @@ async function refreshContents() {
     </tr>`;
   }).join("") || empty(8, "暂无作品", "i-film", "监控目标有新作品时会自动抓取并下载,显示在这里");
   pruneSel(selContent, rows.map(r => r.id)); updateContentSelBar();
+  renderContentPager();
 }
 async function retryDl(id) {
   const btn = event.target.closest("button"); btn.disabled = true; btn.textContent = "重试中…";
@@ -2535,14 +2841,14 @@ async function addWatch() {
 function watchRow(w) {
   const base = esc(watchBaseName(w));
   return `<tr>
-    <td><div class="user-cell">${w.avatar ? `<img class="avatar" src="${w.avatar}" referrerpolicy="no-referrer">` : ""}<div><span>${base}</span>${w.alias ? `<div class="alias-line">${esc(w.alias)}</div>` : ""}</div></div></td>
-    <td>${metaChips(w)}</td>
-    <td>${w.kind === "video" ? (w.platform === "xhs" ? "笔记" : "视频") : (w.platform === "xhs" ? "创作者" : "账号")}</td>
-    <td>${w.platform === "xhs" ? "公开" : (SRC[w.mode] || w.mode)}</td>
-    <td class="num">${w.comment_count}</td>
-    <td class="num">${Math.round(w.interval_seconds / 60)} 分</td>
-    <td class="mut">${w.last_scan_at ? new Date(w.last_scan_at + "Z").toLocaleString() : "—"}${w.last_error ? ` <span class="warn-ic" title="${esc(w.last_error)}">${ic("i-info")}</span>` : ""}</td>
-    <td><span class="pill ${w.enabled ? "active" : "invalid"}">${w.enabled ? "监控中" : "已暂停"}</span></td>
+    <td class="card-main"><div class="user-cell">${w.avatar ? `<img class="avatar" src="${w.avatar}" referrerpolicy="no-referrer">` : ""}<div><span>${base}</span>${w.alias ? `<div class="alias-line">${esc(w.alias)}</div>` : ""}</div></div></td>
+    <td data-label="分组">${metaChips(w)}</td>
+    <td data-label="类型">${w.kind === "video" ? (w.platform === "xhs" ? "笔记" : "视频") : (w.platform === "xhs" ? "创作者" : "账号")}</td>
+    <td data-label="来源">${w.platform === "xhs" ? "公开" : (SRC[w.mode] || w.mode)}</td>
+    <td data-label="评论数" class="num">${w.comment_count}</td>
+    <td data-label="间隔" class="num">${Math.round(w.interval_seconds / 60)} 分</td>
+    <td data-label="扫描" class="mut">${w.last_scan_at ? new Date(w.last_scan_at + "Z").toLocaleString() : "—"}${w.last_error ? ` <span class="warn-ic" title="${esc(w.last_error)}">${ic("i-info")}</span>` : ""}</td>
+    <td data-label="状态"><span class="pill ${w.enabled ? "active" : "invalid"}">${w.enabled ? "监控中" : "已暂停"}</span></td>
     <td class="acttd">
       <button class="ghost sm" onclick="scanWatch(${w.id})">立即抓取</button>
       <button class="ghost sm" onclick="editWatchMeta(${w.id})">管理</button>
@@ -2554,15 +2860,25 @@ function renderWatchRows() {
   const groupName = $("watch-group") ? $("watch-group").value : "";
   const tag = $("watch-tag") ? $("watch-tag").value : "";
   const query = (($("watch-search") && $("watch-search").value) || "").trim().toLocaleLowerCase();
-  const rows = WATCHES.filter(w => {
+  const filtered = WATCHES.filter(w => {
     if (!matchesMeta(w, groupName, tag)) return false;
     if (!query) return true;
     return [watchBaseName(w), w.alias, w.group_name, ...itemTags(w)]
       .join(" ").toLocaleLowerCase().includes(query);
   });
-  if ($("watch-filter-count")) $("watch-filter-count").textContent = `显示 ${rows.length} / ${WATCHES.length}`;
+  WATCH_TOTAL = filtered.length;
+  const pages = Math.max(1, Math.ceil(WATCH_TOTAL / WATCH_PAGE_SIZE) || 1);
+  if (WATCH_TOTAL > 0 && WATCH_PAGE > pages) WATCH_PAGE = pages;
+  const start = (WATCH_PAGE - 1) * WATCH_PAGE_SIZE;
+  const rows = filtered.slice(start, start + WATCH_PAGE_SIZE);
+  if ($("watch-filter-count")) {
+    $("watch-filter-count").textContent = WATCH_TOTAL === WATCHES.length
+      ? `共 ${WATCHES.length} 条`
+      : `匹配 ${WATCH_TOTAL} / ${WATCHES.length}`;
+  }
   $("watch-table").innerHTML = rows.map(watchRow).join("")
     || empty(9, "没有匹配的评论监控", "i-msg", WATCHES.length ? "调整分组、标签或搜索条件" : "在上方添加一个评论监控");
+  renderWatchPager();
 }
 async function refreshWatches() {
   const ws = await api("/api/comment-watches?platform=" + PLATFORM);
@@ -2595,12 +2911,27 @@ async function toggleWatch(id, on) { try { await api("/api/comment-watches/" + i
 async function delWatch(id) { if (await uiConfirm({ title: "删除评论监控", message: "删除该评论监控及其抓到的评论?", okText: "删除", danger: true })) { try { await api("/api/comment-watches/" + id, { method: "DELETE" }); toast("已删除", "ok"); refreshWatches(); refreshComments(); } catch (e) { toast("删除失败:" + e.message, "err"); } } }
 
 async function refreshComments() {
-  const params = new URLSearchParams({ limit: "80", platform: PLATFORM });
+  const offset = Math.max(0, (COMMENT_PAGE - 1) * COMMENT_PAGE_SIZE);
+  const params = new URLSearchParams({
+    limit: String(COMMENT_PAGE_SIZE),
+    offset: String(offset),
+    platform: PLATFORM,
+  });
   if (COMMENT_SRC) params.set("watch_id", COMMENT_SRC);
   if (COMMENT_GROUP) params.set("group_name", COMMENT_GROUP);
   if (COMMENT_TAG) params.set("tag", COMMENT_TAG);
-  const rows = await api("/api/comments?" + params.toString());
-  $("stat-cmt").textContent = rows.length;
+  const data = await api("/api/comments?" + params.toString());
+  const rows = Array.isArray(data) ? data : (data.items || []);
+  COMMENT_TOTAL = Array.isArray(data) ? rows.length : (data.total || 0);
+  // 删到空页时自动回退
+  const pages = Math.max(1, Math.ceil(COMMENT_TOTAL / COMMENT_PAGE_SIZE) || 1);
+  if (COMMENT_TOTAL > 0 && COMMENT_PAGE > pages) {
+    COMMENT_PAGE = pages;
+    return refreshComments();
+  }
+  if (!COMMENT_SRC && !COMMENT_GROUP && !COMMENT_TAG) {
+    $("stat-cmt").textContent = COMMENT_TOTAL;
+  }
   $("comment-table").innerHTML = rows.map(r => {
     const w = watchById(r.watch_id);
     const src = w ? sourceMeta(w) : "";
@@ -2614,6 +2945,7 @@ async function refreshComments() {
   </tr>`;
   }).join("") || empty(6, "暂无评论", "i-msg", "添加评论监控后,抓到的新评论会显示在这里,并可推送通知");
   pruneSel(selComment, rows.map(r => r.id)); updateCommentSelBar();
+  renderCommentPager();
 }
 async function delComment(id) {
   try { await api("/api/comments/" + id, { method: "DELETE" }); refreshComments(); }
@@ -2621,7 +2953,12 @@ async function delComment(id) {
 }
 async function clearComments() {
   if (!await uiConfirm({ title: "清空评论", message: "清空所有评论记录?", okText: "清空", danger: true })) return;
-  try { const r = await api("/api/comments", { method: "DELETE" }); toast(`已清空 ${r.deleted} 条评论`, "ok"); refreshComments(); }
+  try {
+    const r = await api("/api/comments", { method: "DELETE" });
+    toast(`已清空 ${r.deleted} 条评论`, "ok");
+    COMMENT_PAGE = 1;
+    refreshComments();
+  }
   catch (e) { toast("清空失败:" + e.message, "err"); }
 }
 
@@ -2749,11 +3086,14 @@ document.addEventListener("keydown", e => {
 // ─── 发布到小红书 ───
 function populatePubAcc() {
   const sel = $("pub-acc"); if (!sel) return;
-  // 小红书发布需创作者号;抖音 / 快手发布有登录态即可(走浏览器自动化)
+  // 小红书发布需创作者号;抖音 / 快手 / YouTube 有登录态即可(走浏览器自动化)
   const list = PLATFORM === "xhs" ? ACCOUNTS.filter(a => a.has_creator) : ACCOUNTS;
   const ph = list.length ? "选择发布账号"
     : (PLATFORM === "kuaishou" ? "请先完成「快手扫码/创作者登录」"
-      : PLATFORM === "douyin" ? "请先完成「抖音扫码/创作者登录」" : "请先完成「小红书创作者登录」");
+      : PLATFORM === "douyin" ? "请先完成「抖音扫码/创作者登录」"
+      : PLATFORM === "youtube" ? "请先完成「YouTube 登录」"
+      : PLATFORM === "shipinhao" ? "请先完成「视频号登录」"
+      : "请先完成「小红书创作者登录」");
   sel.innerHTML = accOptions(list, ph);
   if (list.length) sel.value = String(list[0].id);
 }
@@ -2802,6 +3142,9 @@ function bindPubFilePicker() {
 async function addPublish() {
   const acc = $("pub-acc").value;
   if (!acc) { toast("请选择" + (PF_NAME[PLATFORM] || "发布") + "账号", "err"); return; }
+  if (PLATFORM === "youtube" && $("pub-type") && $("pub-type").value !== "video") {
+    toast("YouTube 目前仅支持上传视频", "err"); return;
+  }
   const files = $("pub-files").files;
   if (!files.length) { toast("请先选择要发布的文件", "err"); return; }
   const btn = evtBtn();
@@ -3403,8 +3746,15 @@ switchTab((() => {
 })());
 switchHubTab(HUB_TAB);   // 恢复上次停留的子标签(我的作品/关注/粉丝/私信)
 
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && document.body.classList.contains("nav-open")) closeNav();
+});
+window.addEventListener("resize", () => {
+  if (window.innerWidth > 820 && document.body.classList.contains("nav-open")) closeNav();
+});
+
 // restore last-selected platform (default: 抖音)
-PLATFORM = (() => { try { const p = localStorage.getItem("dym-pf"); return ["xhs", "douyin", "kuaishou", "shipinhao"].includes(p) ? p : "douyin"; } catch (e) { return "douyin"; } })();
+PLATFORM = (() => { try { const p = localStorage.getItem("dym-pf"); return PF_ALL.includes(p) ? p : "douyin"; } catch (e) { return "douyin"; } })();
 applyPlatformUI();
 
 onTypeChange(); bindPubFilePicker(); onPubType(); populateWatchAccount(); onAcMode(); loadSettings(); refreshAccounts(); refreshProxies(); refreshChannels(); loop();

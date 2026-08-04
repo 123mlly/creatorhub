@@ -22,6 +22,7 @@ from fastapi import FastAPI, HTTPException, Request, UploadFile, File
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field as PydanticField
+from sqlalchemy import func
 from sqlmodel import select
 
 from .browser import (BrowserManager, cookie_string_to_state,
@@ -29,10 +30,12 @@ from .browser import (BrowserManager, cookie_string_to_state,
                       interactive_xhs_login, interactive_xhs_creator_login,
                       interactive_ks_login, interactive_ks_creator_login,
                       interactive_channels_login, interactive_channels_creator_login,
+                      interactive_youtube_login,
                       fetch_self_profile, fetch_xhs_self_profile, fetch_ks_self_profile,
                       fetch_channels_self_profile,
                       fetch_account_works, fetch_follows, fetch_dm_conversations,
                       fetch_dm_history)
+from .runtime import is_docker, qr_login_enabled
 from .platforms.douyin import (
     DouyinClient,
     cookie_from_state as douyin_cookie_from_state,
@@ -52,6 +55,11 @@ from .platforms.xhs import (resolve_note as xhs_resolve_note,
 from .platforms.kuaishou import (resolve_ks_user_id, resolve_ks_photo_id,
                   looks_like_photo as ks_looks_like_photo,
                   parse_self_user as parse_ks_self_user)
+from .platforms.youtube import (
+    resolve_youtube_channel_ref,
+    fetch_youtube_self_profile,
+    parse_yt_self_user,
+)
 from .platforms.channels import parse_self_user as parse_channels_self_user
 from .engine import Downloader, MonitorEngine
 from .engine.share_downloader import (
@@ -130,10 +138,34 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="CreatorHub", lifespan=lifespan)
-WEB_DIR = Path(__file__).parent / "web"
+def _web_dir() -> Path:
+    """开发态用源码旁的 web/;打包态优先 _MEIPASS/app/web。"""
+    here = Path(__file__).parent / "web"
+    if here.is_dir():
+        return here
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        bundled = Path(meipass) / "app" / "web"
+        if bundled.is_dir():
+            return bundled
+    return here
+
+
+WEB_DIR = _web_dir()
 
 
 # ─────────── 扫码登录(真实浏览器) ───────────
+_QR_DISABLED_MSG = (
+    "当前为 Docker / 无桌面模式，已禁用扫码登录。"
+    "请使用「Cookie 粘贴」添加或更新账号。"
+)
+
+
+def _require_qr_login() -> None:
+    if not qr_login_enabled():
+        raise HTTPException(400, _QR_DISABLED_MSG)
+
+
 async def _xhs_profile(state: str, proxy: str = ""):
     """用签名直连 API 拿小红书账号资料(me 身份 + otherinfo 昵称/头像/粉丝)。
     返回 (user dict, error)。error == "logged_out" 表示登录态失效。"""
@@ -229,6 +261,8 @@ async def _enrich_account_profile(account_id: int, state: str) -> str:
             # 视频号扫码授权后，服务端会话偶尔要数秒才在新页面中生效。
             # 单次打开被重定向到登录页不能立即把刚添加的账号判为失效。
             u, err = await _fetch_channels_profile_with_retry(identity)
+        elif platform == "youtube":
+            u, err = await fetch_youtube_self_profile(browser, identity)
         else:
             u, err = await fetch_self_profile(browser, identity)
     except Exception:
@@ -244,6 +278,8 @@ async def _enrich_account_profile(account_id: int, state: str) -> str:
                 p = parse_ks_self_user(u)
             elif platform == "shipinhao":
                 p = parse_channels_self_user(u)
+            elif platform == "youtube":
+                p = parse_yt_self_user(u)
             else:
                 p = parse_self_user(u)
             if p.get("nickname"):
@@ -278,6 +314,7 @@ async def _run_login(task_id: str, creator: bool = False, account_id: int | None
     nm = ("小红书账号" if platform == "xhs"
           else "快手账号" if platform == "kuaishou"
           else "视频号账号" if platform == "shipinhao"
+          else "YouTube 账号" if platform == "youtube"
           else "创作者账号" if creator else "扫码账号")
     try:
         # 1) 准备画像 + identity(新建账号此时不写库,只用临时 profile)
@@ -325,6 +362,8 @@ async def _run_login(task_id: str, creator: bool = False, account_id: int | None
         elif platform == "shipinhao":
             # 视频号只有一套登录态(助手即创作平台),读取/发布共用
             ok, state_json, nickname = await interactive_channels_login(browser, identity)
+        elif platform == "youtube":
+            ok, state_json, nickname = await interactive_youtube_login(browser, identity)
         elif creator:
             ok, state_json, nickname = await interactive_creator_login(browser, identity)
         else:
@@ -396,6 +435,7 @@ async def _run_login(task_id: str, creator: bool = False, account_id: int | None
 
 @app.post("/api/login/browser/start")
 async def login_browser_start(proxy: str = "auto"):
+    _require_qr_login()
     if browser is None:
         raise HTTPException(503, "浏览器未就绪")
     task_id = uuid.uuid4().hex
@@ -408,6 +448,7 @@ async def login_browser_start(proxy: str = "auto"):
 @app.post("/api/login/creator/start")
 async def login_creator_start(proxy: str = "auto"):
     """创作中心登录(用于自有账号评论模式;其登录态同样可用于公开抓取)。"""
+    _require_qr_login()
     if browser is None:
         raise HTTPException(503, "浏览器未就绪")
     task_id = uuid.uuid4().hex
@@ -420,6 +461,7 @@ async def login_creator_start(proxy: str = "auto"):
 @app.post("/api/login/xhs/start")
 async def login_xhs_start(proxy: str = "auto"):
     """小红书扫码登录(用于监控/读取)。"""
+    _require_qr_login()
     if browser is None:
         raise HTTPException(503, "浏览器未就绪")
     task_id = uuid.uuid4().hex
@@ -432,6 +474,7 @@ async def login_xhs_start(proxy: str = "auto"):
 @app.post("/api/login/xhs-creator/start")
 async def login_xhs_creator_start(proxy: str = "auto"):
     """小红书「创作服务平台」登录(用于发布/已发布列表)。"""
+    _require_qr_login()
     if browser is None:
         raise HTTPException(503, "浏览器未就绪")
     task_id = uuid.uuid4().hex
@@ -444,6 +487,7 @@ async def login_xhs_creator_start(proxy: str = "auto"):
 @app.post("/api/login/kuaishou/start")
 async def login_ks_start(proxy: str = "auto"):
     """快手扫码登录(用于监控/读取)。"""
+    _require_qr_login()
     if browser is None:
         raise HTTPException(503, "浏览器未就绪")
     task_id = uuid.uuid4().hex
@@ -456,6 +500,7 @@ async def login_ks_start(proxy: str = "auto"):
 @app.post("/api/login/kuaishou-creator/start")
 async def login_ks_creator_start(proxy: str = "auto"):
     """快手「创作者服务平台」登录(用于发布)。"""
+    _require_qr_login()
     if browser is None:
         raise HTTPException(503, "浏览器未就绪")
     task_id = uuid.uuid4().hex
@@ -469,6 +514,7 @@ async def login_ks_creator_start(proxy: str = "auto"):
 @app.post("/api/login/shipinhao/start")
 async def login_channels_start(proxy: str = "auto"):
     """视频号扫码登录(读取/发布共用,微信扫码)。"""
+    _require_qr_login()
     if browser is None:
         raise HTTPException(503, "浏览器未就绪")
     task_id = uuid.uuid4().hex
@@ -495,10 +541,23 @@ class CookieIn(BaseModel):
     platform: str = "douyin"            # douyin | xhs
 
 
+@app.post("/api/login/youtube/start")
+async def login_youtube_start(proxy: str = "auto"):
+    """YouTube / Google 浏览器登录(Cookie 也可,见 /api/login/cookie)。"""
+    _require_qr_login()
+    if browser is None:
+        raise HTTPException(503, "浏览器未就绪")
+    task_id = uuid.uuid4().hex
+    login_tasks[task_id] = {"status": "opening"}
+    asyncio.create_task(_run_login(task_id, platform="youtube", proxy_choice=proxy))
+    return {"task_id": task_id, "status": "opening",
+            "hint": "已打开 YouTube 窗口,请在其中完成 Google 登录"}
+
+
 @app.post("/api/login/cookie")
 async def login_cookie(body: CookieIn):
     """Cookie 粘贴兜底登录:转成浏览器登录态。"""
-    platform = body.platform if body.platform in ("douyin", "xhs", "kuaishou") else "douyin"
+    platform = body.platform if body.platform in ("douyin", "xhs", "kuaishou", "youtube") else "douyin"
     state = cookie_string_to_state(body.cookie, platform)
     with get_session() as s:
         acc = DouyinAccount(nickname=body.nickname or "Cookie账号", platform=platform,
@@ -606,6 +665,7 @@ async def refresh_account_profile(account_id: int):
 @app.post("/api/accounts/{account_id}/relogin/start")
 async def relogin_start(account_id: int):
     """重新登录:更新原账号的登录态(账号是创作者号则走创作中心)。"""
+    _require_qr_login()
     if browser is None:
         raise HTTPException(503, "浏览器未就绪")
     with get_session() as s:
@@ -1133,7 +1193,8 @@ async def cancel_account_action(task_id: int):
 
 
 _PLATFORM_HOST = {"douyin": "douyin.com", "xhs": "xiaohongshu.com",
-                  "kuaishou": "kuaishou.com", "shipinhao": "weixin.qq.com"}
+                  "kuaishou": "kuaishou.com", "shipinhao": "weixin.qq.com",
+                  "youtube": "youtube.com"}
 
 
 @app.post("/api/accounts/{account_id}/open-browser")
@@ -1142,6 +1203,7 @@ async def open_account_browser(account_id: int, url: str = ""):
     (仅允许本平台域名,用于「查看」视频号作品/管理页等需登录态才能打开的页面)。
     留给用户手动操作(查看/收发私信、F12 抓接口、手动维护等)。关闭窗口即落盘 Cookie。
     注意:窗口开着期间该账号的后台抓取/写操作会因 profile 占用而暂时失败,用完关掉即可。"""
+    _require_qr_login()
     if browser is None:
         raise HTTPException(503, "浏览器未就绪")
     with get_session() as s:
@@ -1160,7 +1222,8 @@ async def open_account_browser(account_id: int, url: str = ""):
             pass
     home = {"xhs": "https://www.xiaohongshu.com/",
             "kuaishou": "https://www.kuaishou.com/",
-            "shipinhao": "https://channels.weixin.qq.com/platform"}.get(
+            "shipinhao": "https://channels.weixin.qq.com/platform",
+            "youtube": "https://www.youtube.com/"}.get(
                 platform, "https://www.douyin.com/")
     # 传了 url 且属于本平台域名 -> 停在该地址(否则回首页,防被当跳转开任意站)
     tgt = (url or "").strip()
@@ -1634,6 +1697,8 @@ def _settings_dict() -> dict:
         "ai_temperature": get_setting("ai_temperature", "0.9"),
         # 不回传明文 key,只告知是否已配置
         "ai_api_key_set": bool(get_setting("ai_api_key", "")),
+        "docker_mode": is_docker(),
+        "qr_login_enabled": qr_login_enabled(),
     }
 
 
@@ -1751,6 +1816,18 @@ def _write_account_cookie_file(account_id: int | None) -> tuple[str, str, str]:
         account_proxy = acc.proxy or ""
         account_ua = acc.ua or ""
 
+    # YouTube:走专用导出(Google Cookie 镜像到 .youtube.com + expires 规范化)
+    if platform == "youtube":
+        from .platforms.youtube import storage_state_to_cookiefile
+        from .browser.manager import cookie_string_to_state
+        state_for_yt = state_text
+        if not state_for_yt and raw_cookie:
+            state_for_yt = cookie_string_to_state(raw_cookie, "youtube")
+        path = storage_state_to_cookiefile(state_for_yt)
+        if not path:
+            raise HTTPException(400, "所选账号没有可复用的 Cookie 登录态")
+        return path, account_proxy, account_ua
+
     try:
         state = json.loads(state_text or "{}")
     except Exception:
@@ -1761,6 +1838,7 @@ def _write_account_cookie_file(account_id: int | None) -> tuple[str, str, str]:
             "xhs": ".xiaohongshu.com",
             "kuaishou": ".kuaishou.com",
             "shipinhao": ".weixin.qq.com",
+            "youtube": ".youtube.com",
         }.get(platform, ".douyin.com")
         for part in raw_cookie.split(";"):
             name, sep, value = part.strip().partition("=")
@@ -2347,7 +2425,7 @@ class TargetUpdate(BaseModel):
 
 @app.post("/api/monitors")
 async def add_monitor(body: TargetIn):
-    platform = body.platform if body.platform in ("douyin", "xhs", "kuaishou") else "douyin"
+    platform = body.platform if body.platform in ("douyin", "xhs", "kuaishou", "youtube") else "douyin"
     sec_uid = keyword = xsec_token = ""
     kind = "creator"
 
@@ -2365,6 +2443,10 @@ async def add_monitor(body: TargetIn):
         sec_uid = await resolve_ks_user_id(body.url_or_secuid, cfg.engine.user_agent)
         if not sec_uid:
             raise HTTPException(400, "无法解析快手 user_id,请粘贴创作者主页链接 / v.kuaishou.com 短链 / user_id")
+    elif platform == "youtube":
+        sec_uid = resolve_youtube_channel_ref(body.url_or_secuid)
+        if not sec_uid:
+            raise HTTPException(400, "无法解析 YouTube 频道,请粘贴频道主页 / @handle / UC 开头的 channel id")
     else:
         sec_uid = await resolve_sec_uid(body.url_or_secuid, cfg.engine.user_agent)
         if not sec_uid:
@@ -2385,6 +2467,14 @@ async def add_monitor(body: TargetIn):
             if (not monitor_acc or monitor_acc.platform != "douyin"
                     or monitor_acc.status != "active"):
                 raise HTTPException(400, "所选抖音账号不存在或登录态已失效")
+        elif platform == "youtube":
+            if not body.account_id:
+                raise HTTPException(
+                    400, "YouTube 监控必须选择已登录账号(Cookie),否则易被判定为机器人")
+            monitor_acc = s.get(DouyinAccount, body.account_id)
+            if (not monitor_acc or monitor_acc.platform != "youtube"
+                    or not (monitor_acc.storage_state or monitor_acc.cookie)):
+                raise HTTPException(400, "所选 YouTube 账号不存在或缺少 Cookie 登录态")
         elif body.account_id:
             monitor_acc = s.get(DouyinAccount, body.account_id)
             if not monitor_acc or monitor_acc.platform != platform:
@@ -2517,9 +2607,13 @@ async def target_contents(tid: int):
 
 
 @app.get("/api/contents")
-async def all_contents(limit: int = 100, platform: str | None = None,
+async def all_contents(limit: int = 10, offset: int = 0,
+                       platform: str | None = None,
                        target_id: int | None = None, group_name: str = "",
                        tag: str = ""):
+    """最新作品 / 下载状态分页列表。返回 {items, total, done_total, limit, offset}。"""
+    limit = max(1, min(int(limit or 10), 200))
+    offset = max(0, int(offset or 0))
     with get_session() as s:
         q = select(ContentRecord)
         if platform:
@@ -2535,12 +2629,28 @@ async def all_contents(limit: int = 100, platform: str | None = None,
             eligible_ids = [t.id for t in targets if t.id is not None
                             and _meta_matches(t, group_name, tag)]
             if not eligible_ids:
-                return []
+                return {"items": [], "total": 0, "done_total": 0,
+                        "limit": limit, "offset": offset}
             q = q.where(ContentRecord.target_id.in_(eligible_ids))
-        # 按作品发布时间倒序(回填时多条同批入库,用 id 排序会乱;create_time 才是真实时间序)
-        rows = s.exec(q.order_by(ContentRecord.create_time.desc(),
-                                 ContentRecord.id.desc()).limit(limit)).all()
-        return [_content_dict(r) for r in rows]
+        id_sub = q.with_only_columns(ContentRecord.id).order_by(None).subquery()
+        total = s.exec(select(func.count()).select_from(id_sub)).one()
+        done_total = s.exec(
+            select(func.count()).select_from(
+                q.where(ContentRecord.download_status == "done")
+                .with_only_columns(ContentRecord.id).order_by(None).subquery()
+            )
+        ).one()
+        rows = s.exec(
+            q.order_by(ContentRecord.create_time.desc(), ContentRecord.id.desc())
+            .offset(offset).limit(limit)
+        ).all()
+        return {
+            "items": [_content_dict(r) for r in rows],
+            "total": int(total or 0),
+            "done_total": int(done_total or 0),
+            "limit": limit,
+            "offset": offset,
+        }
 
 
 @app.get("/api/stats/series")
@@ -2951,9 +3061,13 @@ def _comment_dict(c: CommentRecord) -> dict:
 
 
 @app.get("/api/comments")
-async def list_comments(limit: int = 100, watch_id: int | None = None,
+async def list_comments(limit: int = 10, offset: int = 0,
+                        watch_id: int | None = None,
                         aweme_id: str | None = None, platform: str | None = None,
                         group_name: str = "", tag: str = ""):
+    """抓到的评论分页列表。返回 {items, total, limit, offset}。"""
+    limit = max(1, min(int(limit or 10), 200))
+    offset = max(0, int(offset or 0))
     with get_session() as s:
         q = select(CommentRecord)
         if platform is not None:
@@ -2971,10 +3085,21 @@ async def list_comments(limit: int = 100, watch_id: int | None = None,
             eligible_ids = [w.id for w in watches if w.id is not None
                             and _meta_matches(w, group_name, tag)]
             if not eligible_ids:
-                return []
+                return {"items": [], "total": 0, "limit": limit, "offset": offset}
             q = q.where(CommentRecord.watch_id.in_(eligible_ids))
-        rows = s.exec(q.order_by(CommentRecord.id.desc()).limit(limit)).all()
-        return [_comment_dict(c) for c in rows]
+        # count 用同一过滤条件；subquery 避免 order_by 干扰
+        total = s.exec(select(func.count()).select_from(
+            q.with_only_columns(CommentRecord.id).order_by(None).subquery()
+        )).one()
+        rows = s.exec(
+            q.order_by(CommentRecord.id.desc()).offset(offset).limit(limit)
+        ).all()
+        return {
+            "items": [_comment_dict(c) for c in rows],
+            "total": int(total or 0),
+            "limit": limit,
+            "offset": offset,
+        }
 
 
 @app.delete("/api/comments/{cmid}")
@@ -3085,20 +3210,23 @@ async def add_publish(body: PublishIn):
         raise HTTPException(400, "没有可用的媒体文件,请先上传")
     with get_session() as s:
         acc = s.get(DouyinAccount, body.account_id)
-        if not acc or acc.platform not in ("xhs", "kuaishou", "douyin", "shipinhao"):
-            raise HTTPException(400, "请选择一个已登录的抖音 / 小红书 / 快手 / 视频号账号")
+        if not acc or acc.platform not in ("xhs", "kuaishou", "douyin", "shipinhao", "youtube"):
+            raise HTTPException(400, "请选择一个已登录的抖音 / 小红书 / 快手 / 视频号 / YouTube 账号")
         pname = {"kuaishou": "快手", "douyin": "抖音",
-                 "shipinhao": "视频号"}.get(acc.platform, "小红书")
-        if acc.platform in ("kuaishou", "douyin", "shipinhao"):
-            # 抖音 / 快手 / 视频号发布走浏览器自动化,登录态在该账号持久 profile 里
+                 "shipinhao": "视频号", "youtube": "YouTube"}.get(acc.platform, "小红书")
+        if acc.platform == "youtube" and body.media_type != "video":
+            raise HTTPException(400, "YouTube 目前仅支持上传视频")
+        if acc.platform in ("kuaishou", "douyin", "shipinhao", "youtube"):
+            # 抖音 / 快手 / 视频号 / YouTube 发布走浏览器自动化,登录态在该账号持久 profile 里
             if not (acc.creator_storage_state or acc.storage_state):
                 raise HTTPException(400, f"该{pname}账号不可发布:请先在账号页完成登录")
         elif not (acc.creator_storage_state or has_creator_cookies(acc.storage_state)):
             raise HTTPException(400, "该账号不可发布:请对该号完成「小红书扫码登录」或「创作者登录」")
         vis = body.visibility if body.visibility in ("public", "friends", "private") else "public"
+        title_cap = 100 if acc.platform == "youtube" else 20
         t = PublishTask(
             platform=acc.platform, account_id=body.account_id, media_type=body.media_type,
-            title=body.title.strip()[:20], desc=body.desc, topics=body.topics,
+            title=body.title.strip()[:title_cap], desc=body.desc, topics=body.topics,
             location=(body.location or "").strip()[:60],
             visibility=vis, allow_save=bool(body.allow_save),
             media_json=json.dumps(paths), scheduled_at=_parse_when(body.scheduled_at),

@@ -522,3 +522,86 @@ async def _read_nickname(page) -> str:
         except Exception:
             continue
     return ""
+
+
+# YouTube / Google 登录成功常见 Cookie
+_YT_LOGIN_COOKIES = {"SID", "HSID", "SSID", "APISID", "SAPISID", "LOGIN_INFO", "__Secure-1PSID"}
+
+
+async def interactive_youtube_login(mgr: BrowserManager, identity: Identity,
+                                    timeout_seconds: int = 300,
+                                    start_url: str = "https://www.youtube.com/"
+                                    ) -> Tuple[bool, str, str]:
+    """YouTube 浏览器登录。打开窗口让用户完成 Google 登录,落地 Cookie。
+    返回 (是否成功, storage_state_json, nickname)。判定:出现 SID/LOGIN_INFO 等登录 Cookie。"""
+    ctx = await mgr.open_headed(identity)
+    page = await ctx.new_page()
+    await _focus(page)
+    logged = False
+    nickname = ""
+    state_json = ""
+    try:
+        await page.goto(start_url, wait_until="domcontentloaded", timeout=45000)
+        await _focus(page)
+        for sel in ('text=登录', 'text=Sign in', 'a[aria-label*="Sign in"]',
+                    'a[href*="ServiceLogin"]', 'yt-button-shape a'):
+            try:
+                await page.click(sel, timeout=2500)
+                break
+            except Exception:
+                continue
+        waited = 0
+        while waited < timeout_seconds:
+            if page.is_closed():
+                break
+            try:
+                cookies = await ctx.cookies()
+            except Exception:
+                break
+            names = {c["name"] for c in cookies}
+            # LOGIN_INFO 是 YouTube 登录态;SID 系列是 Google 账号
+            if "LOGIN_INFO" in names or (
+                "SID" in names and ("SAPISID" in names or "__Secure-1PSID" in names)
+            ):
+                # 确认落在 youtube 域
+                yt_hosts = {c.get("domain", "") for c in cookies
+                            if c.get("name") in _YT_LOGIN_COOKIES}
+                if any("youtube" in d or "google" in d for d in yt_hosts):
+                    logged = True
+                    break
+            await asyncio.sleep(2)
+            waited += 2
+        if logged:
+            await page.wait_for_timeout(1500)
+            # 尽量回到 youtube 主页再读昵称
+            try:
+                await page.goto("https://www.youtube.com/", wait_until="domcontentloaded",
+                                timeout=20000)
+            except Exception:
+                pass
+            state_json = json.dumps(await ctx.storage_state())
+            nickname = await _read_youtube_nickname(page)
+    finally:
+        try:
+            await ctx.close()
+        except Exception:
+            pass
+    return logged, state_json, nickname
+
+
+async def _read_youtube_nickname(page) -> str:
+    try:
+        # 头像按钮 title / aria-label 常带账号名
+        for sel in ('#avatar-btn', 'button#avatar-btn',
+                    'yt-img-shadow#avatar img', '#account-name'):
+            try:
+                el = page.locator(sel).first
+                for attr in ("alt", "title", "aria-label"):
+                    v = await el.get_attribute(attr, timeout=800)
+                    if v and v.strip() and "avatar" not in v.lower():
+                        return v.strip()[:40]
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return ""

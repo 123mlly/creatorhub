@@ -45,6 +45,7 @@ from ..platforms.kuaishou import (parse_ks_feed, parse_ks_comment,
 from ..platforms.channels import (parse_channels_feed, parse_channels_comment,
                    flatten_channels_comments, parse_self_user as parse_channels_self_user,
                    publish_channels)
+from ..platforms.youtube import publish_youtube
 from ..models import (ContentRecord, CommentRecord, CommentRule, CommentTask,
                       CommentWatch, DouyinAccount, MonitorTarget,
                       NotificationChannel, PublishTask, AccountActionTask,
@@ -289,6 +290,9 @@ class MonitorEngine:
                         u, err = await fetch_ks_self_profile(self.browser, identity)
                     elif platform == "shipinhao":
                         u, err = await fetch_channels_self_profile(self.browser, identity)
+                    elif platform == "youtube":
+                        from ..platforms.youtube import fetch_youtube_self_profile
+                        u, err = await fetch_youtube_self_profile(self.browser, identity)
                     else:
                         u, err = await fetch_self_profile(self.browser, identity)
             except Exception:
@@ -304,6 +308,9 @@ class MonitorEngine:
                         p = parse_ks_self_user(u)
                     elif platform == "shipinhao":
                         p = parse_channels_self_user(u)
+                    elif platform == "youtube":
+                        from ..platforms.youtube import parse_yt_self_user
+                        p = parse_yt_self_user(u)
                     else:
                         p = parse_self_user(u)
                     a.status = "active"
@@ -486,6 +493,8 @@ class MonitorEngine:
             return await self._scan_xhs_target_locked(target_id)
         if platform == "kuaishou":
             return await self._scan_ks_target_locked(target_id)
+        if platform == "youtube":
+            return await self._scan_youtube_target_locked(target_id)
         with get_session() as s:
             target = s.get(MonitorTarget, target_id)
             if not target:
@@ -639,6 +648,126 @@ class MonitorEngine:
             await self._notify_new(target_name, [aw for _, aw in new_records])
 
         await asyncio.gather(*(self._download(rec.id, aw, base_dir, proxy)
+                               for rec, aw in new_records))
+        return {"ok": not error, "new": len(new_records), "error": error}
+
+    async def _scan_youtube_target_locked(self, target_id: int) -> dict:
+        """YouTube 频道监控:yt-dlp flat playlist 拉最近作品并入库下载。"""
+        from ..platforms.youtube import (
+            fetch_youtube_videos, parse_yt_entry,
+        )
+        with get_session() as s:
+            target = s.get(MonitorTarget, target_id)
+            if not target:
+                return {"ok": False, "error": "target not found"}
+            first_scan = target.last_scan_at is None
+            channel_ref = target.sec_uid
+            if not channel_ref:
+                return self._mark_target_skip(target_id, "缺少 YouTube 频道标识")
+            state = ""
+            proxy = ""
+            if target.account_id:
+                acc = s.get(DouyinAccount, target.account_id)
+                if acc:
+                    if self._proxy_bad(acc):
+                        return self._mark_target_skip(
+                            target_id, "账号代理标记为不可用(proxy bad),已跳过以免暴露真实 IP")
+                    state = acc.storage_state or ""
+                    proxy = acc.proxy or ""
+            known = set(s.exec(
+                select(ContentRecord.aweme_id)
+                .where(ContentRecord.target_id == target_id)).all())
+            base_dir = target.download_dir or get_setting(
+                "download_dir", self.cfg.engine.media_dir)
+            quality = target.video_quality or get_setting("video_quality", "highest")
+            backfill = target.initial_backfill_count
+            if first_scan:
+                limit = 50 if backfill < 0 else max(0, min(backfill or 0, 50))
+                if limit == 0:
+                    # 首扫不回填:只记基线,不下载历史
+                    entries, author, error = await fetch_youtube_videos(
+                        channel_ref, known_ids=set(), limit=1, proxy=proxy,
+                        state_json=state, user_agent=self.cfg.engine.user_agent)
+                    with get_session() as s2:
+                        t = s2.get(MonitorTarget, target_id)
+                        if t:
+                            t.last_scan_at = datetime.utcnow()
+                            t.last_error = error or ""
+                            if author:
+                                if author.get("nickname") and not t.nickname:
+                                    t.nickname = author["nickname"]
+                                if author.get("avatar") and not t.avatar:
+                                    t.avatar = author["avatar"]
+                                if author.get("sec_uid") and not t.sec_uid.startswith("UC"):
+                                    # 保留用户输入的 @handle,若解析出 UC id 可写入
+                                    pass
+                            # 把当前最新 id 记入 known,避免下轮当新视频
+                            for e in entries:
+                                aw = parse_yt_entry(e, quality=quality)
+                                if aw:
+                                    s2.add(ContentRecord(
+                                        platform="youtube", target_id=target_id,
+                                        aweme_id=aw.aweme_id, desc=aw.desc,
+                                        media_type=aw.media_type, quality=aw.quality_label,
+                                        create_time=aw.create_time, cover_url=aw.cover or "",
+                                        like_count=aw.like_count, comment_count=aw.comment_count,
+                                        duration=aw.duration,
+                                        media_json=json.dumps([{"url": m.url, "kind": m.kind,
+                                                                "ext": m.ext, "index": m.index}
+                                                               for m in aw.medias]),
+                                        download_status="skipped",
+                                    ))
+                            s2.add(t); s2.commit()
+                    return {"ok": not error, "new": 0, "error": error, "baseline": True}
+            else:
+                limit = 30
+
+        entries, author, error = await fetch_youtube_videos(
+            channel_ref, known_ids=known, limit=limit, proxy=proxy,
+            state_json=state, user_agent=self.cfg.engine.user_agent)
+
+        new_records = []
+        seen = set()
+        for item in entries:
+            aw = parse_yt_entry(item, quality=quality)
+            if not aw or aw.aweme_id in seen or aw.aweme_id in known:
+                continue
+            seen.add(aw.aweme_id)
+            media_json = json.dumps([{"url": m.url, "kind": m.kind, "ext": m.ext,
+                                      "index": m.index} for m in aw.medias])
+            rec = ContentRecord(
+                platform="youtube", target_id=target_id, aweme_id=aw.aweme_id,
+                desc=aw.desc, media_type=aw.media_type, quality=aw.quality_label,
+                create_time=aw.create_time, cover_url=aw.cover or "",
+                like_count=aw.like_count, comment_count=aw.comment_count,
+                duration=aw.duration, media_json=media_json,
+                download_status="pending",
+            )
+            new_records.append((rec, aw))
+
+        target_name = ""
+        with get_session() as s:
+            for rec, _ in new_records:
+                s.add(rec)
+            t = s.get(MonitorTarget, target_id)
+            if t:
+                t.last_scan_at = datetime.utcnow()
+                t.last_error = error or ""
+                if author:
+                    if author.get("nickname") and not t.nickname:
+                        t.nickname = author["nickname"]
+                    if author.get("avatar") and not t.avatar:
+                        t.avatar = author["avatar"]
+                s.add(t)
+                target_name = t.nickname or (channel_ref[:24] if channel_ref else "youtube")
+            s.commit()
+            for rec, _ in new_records:
+                s.refresh(rec)
+
+        if new_records and not first_scan:
+            await self._notify_new(target_name, [aw for _, aw in new_records])
+
+        await asyncio.gather(*(self._download(rec.id, aw, base_dir, proxy, state_json=state)
                                for rec, aw in new_records))
         return {"ok": not error, "new": len(new_records), "error": error}
 
@@ -1333,6 +1462,18 @@ class MonitorEngine:
             except Exception as e:
                 ok, url, err = False, "", f"发布异常: {e!r}"
             return await self._finish_publish(task_id, ok, url, err, platform="kuaishou")
+
+        if platform == "youtube":
+            if not state:
+                return await self._finish_publish(
+                    task_id, False, "", "该账号未完成 YouTube 登录,请先在账号页登录")
+            try:
+                ok, url, err = await publish_youtube(self.browser, identity, state,
+                                                     media_type, title, desc, files,
+                                                     topics=topics, headed=True)
+            except Exception as e:
+                ok, url, err = False, "", f"发布异常: {e!r}"
+            return await self._finish_publish(task_id, ok, url, err, platform="youtube")
 
         if platform == "shipinhao":
             # 视频号发布:登录态在该账号持久 profile 里,走浏览器自动化(wujie shadowRoot)
@@ -2127,15 +2268,30 @@ class MonitorEngine:
         except Exception as e:
             log.warning("通知发送失败: %s", e)
 
-    async def _download(self, record_id: int, aweme, base_dir: str = "", proxy: str = ""):
+    async def _download(self, record_id: int, aweme, base_dir: str = "",
+                        proxy: str = "", state_json: str = ""):
         async with self._sem:
             with get_session() as s:
                 rec = s.get(ContentRecord, record_id)
                 if rec:
                     rec.download_status = "downloading"
                     s.add(rec); s.commit()
-            ok, path, err = await self.downloader.download_aweme(
-                aweme, base_dir, self._dl_proxy(proxy))
+            if getattr(aweme, "platform", "") == "youtube":
+                from ..platforms.youtube import download_youtube_video, safe_title
+                watch = aweme.medias[0].url if aweme.medias else ""
+                out_dir = self.downloader._target_dir(aweme.author_name, base_dir)
+                stem = f"{aweme.aweme_id}_{safe_title(aweme.desc) or aweme.aweme_id}"
+                ok, path, err = await download_youtube_video(
+                    watch, str(out_dir),
+                    filename_stem=stem,
+                    proxy=self._dl_proxy(proxy),
+                    state_json=state_json,
+                    user_agent=self.cfg.engine.user_agent,
+                    quality=getattr(aweme, "quality_label", "") or "highest",
+                )
+            else:
+                ok, path, err = await self.downloader.download_aweme(
+                    aweme, base_dir, self._dl_proxy(proxy))
             relay_to = None
             with get_session() as s:
                 rec = s.get(ContentRecord, record_id)
@@ -2234,8 +2390,26 @@ class MonitorEngine:
                     s.add(rec); s.commit()
             return {"ok": False, "error": "无媒体直链快照"}
 
-        ok, path, err = await self.downloader.download_aweme(
-            aw, base_dir, self._dl_proxy(acc_proxy))
+        if platform == "youtube":
+            from ..platforms.youtube import download_youtube_video, safe_title
+            watch = aw.medias[0].url if aw.medias else ""
+            out_dir = self.downloader._target_dir(author_name, base_dir)
+            stem = f"{aw.aweme_id}_{safe_title(aw.desc) or aw.aweme_id}"
+            # 重试用入库时的 quality 字段
+            with get_session() as s:
+                rec_q = s.get(ContentRecord, record_id)
+                qlabel = (rec_q.quality if rec_q else "") or "highest"
+            ok, path, err = await download_youtube_video(
+                watch, str(out_dir),
+                filename_stem=stem,
+                proxy=self._dl_proxy(acc_proxy),
+                state_json=acc_state,
+                user_agent=self.cfg.engine.user_agent,
+                quality=qlabel,
+            )
+        else:
+            ok, path, err = await self.downloader.download_aweme(
+                aw, base_dir, self._dl_proxy(acc_proxy))
         with get_session() as s:
             rec = s.get(ContentRecord, record_id)
             if rec:

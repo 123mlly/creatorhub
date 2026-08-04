@@ -1,0 +1,13 @@
+services:
+  creatorhub:
+    build: .
+    container_name: creatorhub
+    ports:
+      - "${CREATORHUB_PORT:-8000}:8000"
+    environment:
+      CREATORHUB_DOCKER: "1"
+      # 国内构建 Chromium 失败时可启用：
+      # PLAYWRIGHT_DOWNLOAD_HOST: "https://npmmirror.com/mirrors/playwright"
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped

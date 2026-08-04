@@ -1,11 +1,14 @@
 """CreatorHub 一键安装、启动与自检入口。
 
 这个文件只使用 Python 标准库，因此可以在项目依赖尚未安装时直接运行。
+依赖由 uv 管理（见 pyproject.toml / uv.lock）。
+
 常用命令：
 
     python creatorhub.py
     python creatorhub.py install
     python creatorhub.py check
+    python creatorhub.py desktop   # 桌面窗口(pywebview + 内置后端)
 """
 from __future__ import annotations
 
@@ -28,7 +31,7 @@ VENV_DIR = ROOT / ".venv"
 MARKER_FILE = VENV_DIR / ".creatorhub-install.json"
 CONFIG_FILE = ROOT / "config.yaml"
 CONFIG_EXAMPLE = ROOT / "config.example.yaml"
-MIN_PYTHON = (3, 10)
+MIN_PYTHON = (3, 11)
 
 
 def log(message: str) -> None:
@@ -68,16 +71,34 @@ def ensure_config() -> None:
     log("已生成 config.yaml（后续可在网页设置中调整常用配置）")
 
 
-def ensure_venv() -> Path:
-    python = venv_python()
-    if python.exists():
-        return python
-    ensure_supported_python()
-    log("首次运行：正在创建隔离的 Python 环境 .venv")
-    run([sys.executable, "-m", "venv", VENV_DIR])
-    if not python.exists():
-        raise RuntimeError(f"虚拟环境创建失败：未找到 {python}")
-    return python
+def uv_executable() -> str | None:
+    found = shutil.which("uv")
+    if found:
+        return found
+    # 官方安装脚本默认路径，可能尚未加入当前 shell 的 PATH
+    candidates = [
+        Path.home() / ".local" / "bin" / "uv",
+        Path.home() / ".cargo" / "bin" / "uv",
+    ]
+    if os.name == "nt":
+        local = os.environ.get("LOCALAPPDATA", "")
+        if local:
+            candidates.append(Path(local) / "uv" / "uv.exe")
+    for path in candidates:
+        if path.is_file() and os.access(path, os.X_OK):
+            return str(path)
+    return None
+
+
+def ensure_uv() -> str:
+    uv = uv_executable()
+    if uv:
+        return uv
+    raise RuntimeError(
+        "未找到 uv。请先安装：https://docs.astral.sh/uv/getting-started/installation/\n"
+        "  macOS / Linux: curl -LsSf https://astral.sh/uv/install.sh | sh\n"
+        "  Windows:       powershell -ExecutionPolicy ByPass -c \"irm https://astral.sh/uv/install.ps1 | iex\""
+    )
 
 
 def npm_executable() -> str | None:
@@ -92,7 +113,7 @@ def npm_executable() -> str | None:
 
 def source_fingerprint() -> str:
     digest = hashlib.sha256()
-    for relative in ("requirements.txt", "package.json", "package-lock.json"):
+    for relative in ("pyproject.toml", "uv.lock", "package.json", "package-lock.json"):
         path = ROOT / relative
         digest.update(relative.encode("utf-8"))
         if path.exists():
@@ -131,17 +152,21 @@ def write_install_marker(*, node_installed: bool, browser_installed: bool) -> No
 
 def install(*, skip_browser: bool = False, skip_node: bool = False) -> None:
     ensure_config()
-    python = ensure_venv()
+    uv = ensure_uv()
 
-    log("正在安装 Python 依赖")
-    run([python, "-m", "pip", "install", "-r", ROOT / "requirements.txt"])
+    log("正在用 uv 同步 Python 依赖（.venv）")
+    run([uv, "sync"])
+
+    python = venv_python()
+    if not python.exists():
+        raise RuntimeError(f"uv sync 完成但未找到虚拟环境：{python}")
 
     browser_installed = not skip_browser
     if skip_browser:
-        log("已跳过 Chromium 安装；扫码登录和采集前需执行 playwright install chromium")
+        log("已跳过 Chromium 安装；扫码登录和采集前需执行：uv run playwright install chromium")
     else:
         log("正在安装 Playwright Chromium（首次下载耗时取决于网络）")
-        run([python, "-m", "playwright", "install", "chromium"])
+        run([uv, "run", "playwright", "install", "chromium"])
 
     node_installed = False
     npm = npm_executable()
@@ -265,6 +290,36 @@ def check() -> None:
     run([python, ROOT / "selftest.py"])
 
 
+def desktop(
+    *,
+    host: str | None,
+    port: int | None,
+    skip_install: bool,
+    skip_browser: bool,
+    skip_node: bool,
+) -> None:
+    """桌面壳:内嵌窗口打开面板,关闭窗口即停后端。"""
+    ensure_config()
+    if not skip_install and not installation_is_current():
+        install(skip_browser=skip_browser, skip_node=skip_node)
+
+    python = venv_python()
+    if not python.exists():
+        raise RuntimeError("尚未安装运行环境，请先运行：python creatorhub.py install")
+
+    config_host, config_port = read_server_defaults()
+    # 桌面模式固定本机回环;端口可用参数覆盖
+    _ = host or config_host
+    selected_port = port or config_port
+
+    command: list[str | Path] = [
+        python, "-m", "app.desktop",
+        "--port", str(selected_port),
+    ]
+    log(f"启动桌面窗口；关闭窗口即退出。端口：{selected_port}")
+    run(command)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="CreatorHub 一键安装与启动",
@@ -273,9 +328,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "command",
         nargs="?",
-        choices=("start", "install", "check"),
+        choices=("start", "install", "check", "desktop"),
         default="start",
-        help="操作；不填写时直接启动",
+        help="操作；不填写时直接启动；desktop=桌面窗口",
     )
     parser.add_argument("--host", help="监听地址（默认读取 config.yaml）")
     parser.add_argument("--port", type=int, help="监听端口（默认读取 config.yaml）")
@@ -308,6 +363,14 @@ def main() -> int:
             install(skip_browser=args.skip_browser, skip_node=args.skip_node)
         elif args.command == "check":
             check()
+        elif args.command == "desktop":
+            desktop(
+                host=args.host,
+                port=args.port,
+                skip_install=args.skip_install,
+                skip_browser=args.skip_browser,
+                skip_node=args.skip_node,
+            )
         else:
             start(
                 host=args.host,

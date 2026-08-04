@@ -65,7 +65,7 @@ def check_share_downloader() -> bool:
         return True
     except Exception as e:
         print(f"[链接下载] FAIL: {e}")
-        print("   运行: python -m pip install -r requirements.txt")
+        print("   运行: uv sync")
         return False
 
 

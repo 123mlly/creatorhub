@@ -328,12 +328,20 @@ _COOKIE_DOMAIN = {
     "xhs": ".xiaohongshu.com",
     "kuaishou": ".kuaishou.com",
     "shipinhao": ".weixin.qq.com",   # 视频号:finder 登录态(_finder_auth/sessionid)挂在 .weixin.qq.com
+    "youtube": ".youtube.com",
+}
+
+# Google 账号 Cookie 挂在 .google.com,YouTube 业务 Cookie 挂在 .youtube.com
+_GOOGLE_AUTH_COOKIES = {
+    "SID", "HSID", "SSID", "APISID", "SAPISID",
+    "__Secure-1PSID", "__Secure-3PSID", "__Secure-1PAPISID", "__Secure-3PAPISID",
+    "__Secure-1PSIDTS", "__Secure-3PSIDTS", "SIDCC",
 }
 
 
 def cookie_string_to_state(cookie_str: str, platform: str = "douyin") -> str:
     """把粘贴的 Cookie 串转成 Playwright storage_state JSON(兜底登录用)。"""
-    domain = _COOKIE_DOMAIN.get(platform, ".douyin.com")
+    default_domain = _COOKIE_DOMAIN.get(platform, ".douyin.com")
     cookies: List[Dict[str, Any]] = []
     for part in cookie_str.strip().split(";"):
         if "=" not in part:
@@ -341,8 +349,19 @@ def cookie_string_to_state(cookie_str: str, platform: str = "douyin") -> str:
         k, v = part.strip().split("=", 1)
         if not k:
             continue
+        name = k.strip()
+        value = v.strip()
+        # YouTube:Google 认证 Cookie 需同时挂 .google.com 与 .youtube.com,
+        # 否则 yt-dlp 请求 youtube.com 时带不上 SID/PSID,会被当成未登录打 bot。
+        if platform == "youtube" and name in _GOOGLE_AUTH_COOKIES:
+            for domain in (".google.com", ".youtube.com"):
+                cookies.append({
+                    "name": name, "value": value,
+                    "domain": domain, "path": "/",
+                })
+            continue
         cookies.append({
-            "name": k.strip(), "value": v.strip(),
-            "domain": domain, "path": "/",
+            "name": name, "value": value,
+            "domain": default_domain, "path": "/",
         })
     return json.dumps({"cookies": cookies, "origins": []})
