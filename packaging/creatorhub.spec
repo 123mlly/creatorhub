@@ -51,8 +51,13 @@ if example.exists():
     datas.append((str(example), "."))
 
 # Playwright Chromium（由 build 脚本准备到 packaging/ms-playwright）
+# macOS：不要经 PyInstaller datas 打入 —— COLLECT 会对 Chrome.app 做 ad-hoc
+# codesign，嵌套 Framework 会报 bundle format unrecognized（PyInstaller #7969）。
+# build_macos.sh 在生成 .app 后再把 ms-playwright 拷进 _MEIPASS。
 browsers = ROOT / "packaging" / "ms-playwright"
-if browsers.is_dir() and any(browsers.iterdir()):
+if sys.platform == "darwin":
+    print("[spec] macOS: skip bundling ms-playwright via datas (post-copy in build script)")
+elif browsers.is_dir() and any(browsers.iterdir()):
     datas.append((str(browsers), "ms-playwright"))
 else:
     print("[spec] WARNING: packaging/ms-playwright 为空，扫码/发布将无法启动 Chromium")

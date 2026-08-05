@@ -3425,10 +3425,17 @@ class RepostIn(BaseModel):
     media_order: list[int] | None = None  # 剔除/调序后保留的图片原始序号(按新顺序);None=全部原序
 
 
+_REPOST_PF_NAME = {
+    "xhs": "小红书", "douyin": "抖音", "shipinhao": "视频号", "youtube": "YouTube",
+}
+
+
 async def _repost_content(cid: int, body: RepostIn, target_platform: str):
-    """把已下载作品转成目标平台(xhs / douyin / shipinhao)的发布任务。"""
+    """把已下载作品转成目标平台(xhs / douyin / shipinhao / youtube)的发布任务。"""
     if not engine:
         raise HTTPException(503, "引擎未就绪")
+    if target_platform not in _REPOST_PF_NAME:
+        raise HTTPException(400, f"不支持转发到 {target_platform}")
     # 1) 只在会话内做校验,取出需要的值后退出会话,不把 ORM 对象带出去
     with get_session() as s:
         rec = s.get(ContentRecord, cid)
@@ -3436,16 +3443,20 @@ async def _repost_content(cid: int, body: RepostIn, target_platform: str):
             raise HTTPException(404, "作品不存在")
         if rec.download_status != "done":
             raise HTTPException(400, "该作品尚未下载完成,无法转发")
+        if target_platform == "youtube" and rec.media_type != "video":
+            raise HTTPException(400, "YouTube 目前仅支持转发视频(图集请先合成视频)")
         acc = s.get(DouyinAccount, body.account_id)
+        pname = _REPOST_PF_NAME[target_platform]
         if not acc or acc.platform != target_platform:
-            pname = {"douyin": "抖音", "shipinhao": "视频号"}.get(
-                target_platform, "小红书")
             raise HTTPException(400, f"请选择一个已登录的{pname}账号")
-        if target_platform in ("douyin", "shipinhao"):
-            # 抖音/视频号发布走浏览器自动化，有任一持久登录态即可。
+        if target_platform in ("douyin", "shipinhao", "youtube"):
+            # 浏览器自动化发布:有任一持久登录态即可
             if not (acc.creator_storage_state or acc.storage_state):
-                pname = "视频号" if target_platform == "shipinhao" else "抖音"
-                action = "视频号登录" if target_platform == "shipinhao" else "创作者登录"
+                action = {
+                    "shipinhao": "视频号登录",
+                    "youtube": "YouTube 登录",
+                    "douyin": "创作者登录",
+                }[target_platform]
                 raise HTTPException(400, f"该{pname}账号不可发布:请先在账号页完成「{action}」")
         elif not (acc.creator_storage_state or has_creator_cookies(acc.storage_state)):
             raise HTTPException(400, "该账号不可发布:请对该号完成「小红书扫码登录」或「创作者登录」")
@@ -3486,6 +3497,11 @@ async def repost_to_channels(cid: int, body: RepostIn):
     """把一条已下载的抖音作品转成视频号发布任务。"""
     return await _repost_content(cid, body, "shipinhao")
 
+
+@app.post("/api/contents/{cid}/repost-youtube")
+async def repost_to_youtube(cid: int, body: RepostIn):
+    """把一条已下载的视频转成 YouTube Studio 发布任务。"""
+    return await _repost_content(cid, body, "youtube")
 
 # ─────────── 自动评论(规则 + 任务)───────────
 class CommentRuleIn(BaseModel):

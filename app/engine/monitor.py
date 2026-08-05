@@ -1368,7 +1368,7 @@ class MonitorEngine:
         """从已下载作品创建发往目标平台(小红书/抖音/视频号)的发布任务。返回任务 id。
 
         只接收作品 id,内部自开会话取记录,避免跨会话传入已绑定的 ORM 对象。
-        target_platform: xhs / douyin / shipinhao。
+        target_platform: xhs / douyin / shipinhao / youtube。
         title/desc/topics 为 None 时沿用作品原始内容;传了则用编辑后的值(发布前可改)。
         """
         with get_session() as s:
@@ -1385,7 +1385,10 @@ class MonitorEngine:
                           if isinstance(i, int) and 0 <= i < len(files)]
                 if picked:
                     files = picked
-            title_cap = {"douyin": 30, "shipinhao": 16}.get(target_platform, 20)
+            if target_platform == "youtube" and rec.media_type != "video":
+                return None
+            title_cap = {"douyin": 30, "shipinhao": 16, "youtube": 100}.get(
+                target_platform, 20)
             t_title = (title if title is not None else (rec.desc or ""))[:title_cap]
             t_desc = desc if desc is not None else (rec.desc or "")
             t_topics = topics if topics is not None else ""

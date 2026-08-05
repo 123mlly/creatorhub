@@ -2728,7 +2728,8 @@ function noteCard(r) {
       <div class="ncard-actions">
         <span class="pill ${r.download_status}" style="flex:1;justify-content:center" title="${esc(r.error || "")}">${r.download_status}${r.error ? " ⓘ" : ""}</span>
         ${r.download_status === "failed" ? `<button class="ghost sm" onclick="retryDl(${r.id})">重试</button>` : ""}
-        ${(PLATFORM === "xhs" && r.download_status === "done") ? `<button class="ghost sm" onclick="repostDouyin(${r.id})">发抖音</button>` : ""}
+        ${((PLATFORM === "douyin" || PLATFORM === "kuaishou") && r.download_status === "done") ? `<button class="ghost sm" onclick="pickRepostTarget(${r.id})">转发</button>` : ""}
+        ${(PLATFORM === "xhs" && r.download_status === "done") ? `<button class="ghost sm" onclick="pickRepostTarget(${r.id})">转发</button>` : ""}
         <button class="ghost sm" onclick="delContent(${r.id})">删除</button>
       </div>
     </div>
@@ -2784,8 +2785,7 @@ async function refreshContents() {
         <div class="content-status-row"><span class="pill ${r.download_status}">${contentStatusLabel(r.download_status)}</span>${r.error ? `<span class="warn-ic" data-tip="${esc(r.error)}">${ic("i-info")}</span>` : ""}</div>
         <div class="content-action-buttons">
           ${r.download_status === "failed" ? `<button class="ghost sm" onclick="retryDl(${r.id})">重试</button>` : ""}
-          ${(PLATFORM === "douyin" && r.download_status === "done") ? `<button class="ghost sm content-action-primary" onclick="pickRepostTarget(${r.id})">${ic("i-send")}转发</button>` : ""}
-          ${(PLATFORM === "xhs" && r.download_status === "done") ? `<button class="ghost sm content-action-primary" onclick="repostDouyin(${r.id})">${ic("i-send")}发抖音</button>` : ""}
+          ${((PLATFORM === "douyin" || PLATFORM === "kuaishou" || PLATFORM === "xhs") && r.download_status === "done") ? `<button class="ghost sm content-action-primary" onclick="pickRepostTarget(${r.id})">${ic("i-send")}转发</button>` : ""}
           <button class="ghost sm content-action-delete" onclick="delContent(${r.id})" data-tip="删除作品" aria-label="删除作品">${ic("i-trash")}</button>
         </div>
       </td>
@@ -3270,55 +3270,72 @@ async function _pickXhsAccount(withOff) {
   return +v;
 }
 let REPOST_ID = null;
-let REPOST_TARGET = "xhs";           // xhs / douyin / shipinhao
+let REPOST_TARGET = "xhs";           // xhs / douyin / shipinhao / youtube
+const REPOST_PF_NAME = { xhs: "小红书", douyin: "抖音", shipinhao: "视频号", youtube: "YouTube" };
 const repostXhs = (id) => openRepost(id, "xhs");
 const repostDouyin = (id) => openRepost(id, "douyin");
 const repostChannels = (id) => openRepost(id, "shipinhao");
+const repostYoutube = (id) => openRepost(id, "youtube");
 async function pickRepostTarget(id) {
+  const rec = CONTENTS.find(r => r.id === id);
+  const options = [];
+  if (PLATFORM !== "xhs") options.push({ value: "xhs", label: "小红书" });
+  if (PLATFORM !== "shipinhao") options.push({ value: "shipinhao", label: "视频号" });
+  if (PLATFORM === "xhs") options.push({ value: "douyin", label: "抖音" });
+  // YouTube Studio 仅支持视频
+  if (!rec || rec.media_type === "video") {
+    options.push({ value: "youtube", label: "YouTube" });
+  }
+  if (!options.length) { toast("当前作品没有可转发的目标平台", "err"); return; }
   const target = await uiSelect({
     title: "转发作品",
-    hint: "选择要发布到的平台，下一步可以继续编辑标题、文案和发布时间。",
-    options: [
-      { value: "xhs", label: "小红书" },
-      { value: "shipinhao", label: "视频号" },
-    ],
-    value: "shipinhao",
+    hint: "选择要发布到的平台，下一步可以继续编辑标题、文案和发布时间。"
+      + (rec && rec.media_type !== "video" ? "（图集不可转发到 YouTube）" : ""),
+    options,
+    value: options[0].value,
   });
   if (target === null) return;
   openRepost(id, target);
 }
 async function openRepost(id, target) {
   const rec = CONTENTS.find(r => r.id === id);
-  // 拉取目标平台可发布账号:小红书需创作号;抖音/视频号需任一登录态
+  if (target === "youtube" && rec && rec.media_type !== "video") {
+    toast("YouTube 目前仅支持转发视频", "err");
+    return;
+  }
+  // 拉取目标平台可发布账号:小红书需创作号;抖音/视频号/YouTube 需任一登录态
   const all = await api("/api/accounts?platform=" + target);
   const accs = target === "xhs"
     ? all.filter(a => a.has_creator)
     : all.filter(a => a.has_storage || a.has_creator);
   if (!accs.length) {
-    const loginHint = target === "xhs"
-      ? "请先在小红书账号页完成「创作者登录」(发布用)"
-      : target === "shipinhao"
-        ? "请先在视频号账号页完成「视频号登录」"
-        : "请先在抖音账号页完成登录(扫码/创作者/Cookie)";
+    const loginHint = {
+      xhs: "请先在小红书账号页完成「创作者登录」(发布用)",
+      shipinhao: "请先在视频号账号页完成「视频号登录」",
+      youtube: "请先在 YouTube 账号页完成「YouTube 登录」或 Cookie 粘贴",
+      douyin: "请先在抖音账号页完成登录(扫码/创作者/Cookie)",
+    }[target] || "请先添加并登录目标平台账号";
     toast(loginHint, "err");
     return;
   }
   REPOST_ID = id; REPOST_TARGET = target;
   const isDy = target === "douyin";
   const isChannels = target === "shipinhao";
-  const cap = isDy ? 30 : isChannels ? 16 : 20;
-  const pname = isDy ? "抖音" : isChannels ? "视频号" : "小红书";
+  const isYt = target === "youtube";
+  const cap = isYt ? 100 : isDy ? 30 : isChannels ? 16 : 20;
+  const pname = REPOST_PF_NAME[target] || "小红书";
   $("rp-head").textContent = "发" + pname + " · 编辑后推送";
   $("rp-title-label").textContent = `标题(≤${cap} 字)`;
   $("rp-title").maxLength = cap;
-  $("rp-title").placeholder = target === "xhs" ? "给笔记起个标题" : "给作品起个标题";
+  $("rp-title").placeholder = target === "xhs" ? "给笔记起个标题"
+    : isYt ? "给视频起个标题" : "给作品起个标题";
   $("rp-acc").innerHTML = accs.map(a => `<option value="${a.id}">${esc(a.nickname)}</option>`).join("");
   const desc = (rec && rec.desc) || "";
   $("rp-title").value = desc.slice(0, cap);   // 默认用作品描述前若干字当标题
   $("rp-desc").value = desc;
   $("rp-topics").value = "";
   $("rp-when").value = ""; dtSyncAll();
-  $("rp-msg").textContent = "";
+  $("rp-msg").textContent = isYt ? "将通过 YouTube Studio 上传(仅视频)" : "";
   $("rp-src").textContent = rec ? `来源:${rec.media_type === "images" ? "图集" : "视频"} · ${esc((rec.desc || "(无描述)").slice(0, 30))}` : "";
   // 抖音发布设置(可见性 / 保存权限)仅目标为抖音时显示
   if ($("rp-dy-opts")) $("rp-dy-opts").style.display = isDy ? "flex" : "none";
@@ -3417,18 +3434,23 @@ async function submitRepost() {
   if (!accId) { toast("请选择发布账号", "err"); return; }
   const btn = $("rp-submit"); btn.disabled = true;
   $("rp-msg").textContent = "提交中…";
+  let descVal = $("rp-desc").value;
+  if (REPOST_TARGET === "youtube" && !descVal.trim()) {
+    descVal = $("rp-title").value.trim();
+  }
   const body = {
     account_id: accId,
-    title: $("rp-title").value.trim(),
-    desc: $("rp-desc").value,
+    title: (REPOST_TARGET === "youtube"
+      ? $("rp-title").value.trim().slice(0, 100)
+      : $("rp-title").value.trim()),
+    desc: descVal,
     topics: $("rp-topics").value.trim(),
     scheduled_at: $("rp-when").value || null,
     visibility: $("rp-visibility") ? $("rp-visibility").value : "public",
     allow_save: $("rp-allowsave") ? $("rp-allowsave").value !== "0" : true,
     media_order: rpMediaOrder(),
   };
-  const pname = REPOST_TARGET === "douyin" ? "抖音"
-    : REPOST_TARGET === "shipinhao" ? "视频号" : "小红书";
+  const pname = REPOST_PF_NAME[REPOST_TARGET] || "小红书";
   try {
     const r = await api("/api/contents/" + REPOST_ID + "/repost-" + REPOST_TARGET, {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),

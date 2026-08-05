@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import time
 from pathlib import Path
@@ -22,6 +23,40 @@ from playwright.async_api import BrowserContext, async_playwright
 from ..windowing import (CHROMIUM_WINDOW_CLASSES, bring_window_to_front,
                          capture_window_snapshot)
 from .identity import Identity, fingerprint_script
+
+
+def _default_ms_playwright_dir() -> Optional[Path]:
+    home = Path.home()
+    for c in (
+        home / "Library" / "Caches" / "ms-playwright",
+        home / ".cache" / "ms-playwright",
+        Path(os.environ.get("LOCALAPPDATA", "") or "") / "ms-playwright",
+    ):
+        if c and c.is_dir() and any(c.glob("chromium-*")):
+            return c
+    return None
+
+
+def sanitize_playwright_browsers_path() -> None:
+    """Cursor 终端常注入 PLAYWRIGHT_BROWSERS_PATH=.../cursor-sandbox-cache/...
+    该 Chromium 有头启动会立刻退出(TargetClosedError)。强制切回本机缓存。"""
+    raw = (os.environ.get("PLAYWRIGHT_BROWSERS_PATH") or "").strip()
+    bad_markers = ("cursor-sandbox-cache", "/.cursor-sandbox/")
+    bad = (not raw) or any(m in raw for m in bad_markers) or not Path(raw).is_dir()
+    if not bad and not any(Path(raw).glob("chromium-*")):
+        bad = True
+    if not bad:
+        return
+    fallback = _default_ms_playwright_dir()
+    if fallback is not None:
+        print(f"[browser] rewrite PLAYWRIGHT_BROWSERS_PATH -> {fallback}", flush=True)
+        os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(fallback)
+    elif raw:
+        print(f"[browser] drop bad PLAYWRIGHT_BROWSERS_PATH={raw!r}", flush=True)
+        os.environ.pop("PLAYWRIGHT_BROWSERS_PATH", None)
+
+
+sanitize_playwright_browsers_path()
 
 _STEALTH = [
     "--disable-blink-features=AutomationControlled",
@@ -141,6 +176,7 @@ class BrowserManager:
         self._chrome_major: Optional[int] = None         # 实际 Chromium 大版本(启动时探测)
 
     async def start(self):
+        sanitize_playwright_browsers_path()
         self._pw = await async_playwright().start()
         self._chrome_major = await self._detect_chrome_major()
 
@@ -232,7 +268,25 @@ class BrowserManager:
         proxy = _parse_proxy(identity.proxy)
         if proxy:
             kwargs["proxy"] = proxy
-        ctx = await self._pw.chromium.launch_persistent_context(**kwargs)
+        # 每次启动前纠正(父进程/Cursor 可能重新注入沙箱路径)
+        sanitize_playwright_browsers_path()
+        try:
+            ctx = await self._pw.chromium.launch_persistent_context(**kwargs)
+        except Exception as exc:
+            name = type(exc).__name__
+            if "TargetClosed" in name or "has been closed" in str(exc):
+                pw = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "")
+                raise RuntimeError(
+                    "Chromium 启动后立即退出(常见于 Cursor 沙箱浏览器路径)。"
+                    f" 当前 PLAYWRIGHT_BROWSERS_PATH={pw!r}。"
+                    "请在系统终端执行: "
+                    "unset PLAYWRIGHT_BROWSERS_PATH; "
+                    "export PLAYWRIGHT_BROWSERS_PATH=\"$HOME/Library/Caches/ms-playwright\"; "
+                    "uv run playwright install chromium; "
+                    "然后重启服务。"
+                    f" 原始错误: {exc!r}"
+                ) from exc
+            raise
         # Client Hints 与归一后的 UA 保持一致(否则内核按真实版本发 Sec-CH-UA,和 UA 打架)
         sec = self._sec_ch_ua_headers(ua)
         if sec:

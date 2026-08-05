@@ -25,6 +25,28 @@ uv sync --extra package
 log "准备 Playwright Chromium → packaging/ms-playwright"
 mkdir -p "$BUNDLE_BROWSERS"
 
+# 只打入当前 playwright 包声明的 revision，避免混入 Cursor/其它版本导致体积膨胀与 codesign 失败
+CHROMIUM_REV="$(uv run python -c 'import json; from pathlib import Path; import playwright; d=json.loads((Path(playwright.__file__).parent/"driver/package/browsers.json").read_text()); print(next(b["revision"] for b in d["browsers"] if b["name"]=="chromium"))')"
+FFMPEG_REV="$(uv run python -c 'import json; from pathlib import Path; import playwright; d=json.loads((Path(playwright.__file__).parent/"driver/package/browsers.json").read_text()); print(next((b["revision"] for b in d["browsers"] if b["name"]=="ffmpeg"), ""))')"
+if [[ -z "${CHROMIUM_REV}" ]]; then
+  log "错误: 无法从 playwright browsers.json 读取 chromium revision"
+  exit 1
+fi
+log "目标浏览器: chromium-${CHROMIUM_REV} ffmpeg-${FFMPEG_REV:-?}"
+
+# 清掉无关版本，避免误打进包
+shopt -s nullglob
+for d in "$BUNDLE_BROWSERS"/*; do
+  [[ -d "$d" ]] || continue
+  name="$(basename "$d")"
+  case "$name" in
+    "chromium-${CHROMIUM_REV}"|"ffmpeg-${FFMPEG_REV}") ;;
+    chromium_headless_shell-*) rm -rf "$d"; log "移除 $name（不打包 headless_shell）" ;;
+    chromium-*|ffmpeg-*) rm -rf "$d"; log "移除多余 $name" ;;
+  esac
+done
+shopt -u nullglob
+
 # 优先复用本机缓存，避免重复下载
 CACHE_CANDIDATES=(
   "${PLAYWRIGHT_BROWSERS_PATH:-}"
@@ -32,55 +54,46 @@ CACHE_CANDIDATES=(
   "$HOME/.cache/ms-playwright"
 )
 
-copy_browser_tree() {
-  local src="$1"
-  [[ -d "$src" ]] || return 1
-  local found=0
-  shopt -s nullglob
-  for d in "$src"/chromium-* "$src"/ffmpeg-*; do
-    [[ -d "$d" ]] || continue
-    local name
-    name="$(basename "$d")"
-    # headless_shell 体积大且本项目主要用完整 Chromium；有则一并拷
-    if [[ "$name" == chromium_headless_shell-* ]]; then
-      continue
-    fi
-    if [[ ! -d "$BUNDLE_BROWSERS/$name" ]]; then
-      log "复制 $name"
-      cp -R "$d" "$BUNDLE_BROWSERS/$name"
-    fi
-    found=1
+ensure_browser_dir() {
+  local name="$1"
+  [[ -n "$name" ]] || return 0
+  [[ -d "$BUNDLE_BROWSERS/$name" ]] && return 0
+  local c
+  for c in "${CACHE_CANDIDATES[@]}"; do
+    [[ -n "$c" && -d "$c/$name" ]] || continue
+    log "复制 $name ← $c"
+    cp -R "$c/$name" "$BUNDLE_BROWSERS/$name"
+    return 0
   done
-  # 默认不拷 chromium_headless_shell（约 +170MB，本项目用完整 Chromium）
-  shopt -u nullglob
-  [[ "$found" -eq 1 ]]
+  return 1
 }
 
-copied=0
-for c in "${CACHE_CANDIDATES[@]}"; do
-  [[ -n "$c" && -d "$c" ]] || continue
-  if copy_browser_tree "$c"; then
-    copied=1
-    break
-  fi
-done
+need_install=0
+ensure_browser_dir "chromium-${CHROMIUM_REV}" || need_install=1
+if [[ -n "${FFMPEG_REV}" ]]; then
+  ensure_browser_dir "ffmpeg-${FFMPEG_REV}" || need_install=1
+fi
 
-if [[ "$copied" -eq 0 ]] || [[ ! -d "$(echo "$BUNDLE_BROWSERS"/chromium-* | awk '{print $1}')" ]]; then
-  log "缓存中无 Chromium，执行 playwright install chromium…"
+if [[ "$need_install" -eq 1 ]]; then
+  log "缓存中缺 Chromium/ffmpeg，执行 playwright install chromium…"
   export PLAYWRIGHT_BROWSERS_PATH="$BUNDLE_BROWSERS"
   uv run playwright install chromium
 fi
 
-if ! ls "$BUNDLE_BROWSERS"/chromium-* >/dev/null 2>&1; then
-  log "错误: 未能准备 Chromium，请先 uv run playwright install chromium"
+if [[ ! -d "$BUNDLE_BROWSERS/chromium-${CHROMIUM_REV}" ]]; then
+  log "错误: 未能准备 chromium-${CHROMIUM_REV}，请先 uv run playwright install chromium"
   exit 1
 fi
 
 log "Chromium 就绪:"
 du -sh "$BUNDLE_BROWSERS"/* 2>/dev/null || true
 
-log "PyInstaller 打包…"
+log "PyInstaller 打包（Chromium 稍后拷入，避免 codesign 失败）…"
 rm -rf "$DIST/$APP_NAME" "$DIST/CreatorHub" "$BUILD"
+# 清掉可能损坏的 Chromium bincache，避免上次失败残留干扰
+find "${HOME}/Library/Application Support/pyinstaller" \
+  -type d -name 'ms-playwright' -path '*bincache*' \
+  -prune -exec rm -rf {} + 2>/dev/null || true
 uv run pyinstaller \
   --noconfirm \
   --clean \
@@ -91,6 +104,35 @@ uv run pyinstaller \
 if [[ ! -d "$DIST/$APP_NAME" ]]; then
   log "错误: 未生成 $DIST/$APP_NAME"
   exit 1
+fi
+
+# 把浏览器拷进 .app：PyInstaller 6 把 datas 放在 Contents/Resources，
+# Contents/Frameworks（_MEIPASS）里是指向 Resources 的符号链接。
+RESOURCES_DIR="$DIST/$APP_NAME/Contents/Resources"
+FRAMEWORKS_DIR="$DIST/$APP_NAME/Contents/Frameworks"
+if [[ ! -d "$RESOURCES_DIR" || ! -f "$RESOURCES_DIR/base_library.zip" ]]; then
+  log "错误: 找不到 $RESOURCES_DIR/base_library.zip，无法拷入 Chromium"
+  exit 1
+fi
+log "拷入 Chromium → $RESOURCES_DIR/ms-playwright"
+rm -rf "$RESOURCES_DIR/ms-playwright"
+mkdir -p "$RESOURCES_DIR/ms-playwright"
+cp -R "$BUNDLE_BROWSERS/chromium-${CHROMIUM_REV}" "$RESOURCES_DIR/ms-playwright/"
+if [[ -n "${FFMPEG_REV}" && -d "$BUNDLE_BROWSERS/ffmpeg-${FFMPEG_REV}" ]]; then
+  cp -R "$BUNDLE_BROWSERS/ffmpeg-${FFMPEG_REV}" "$RESOURCES_DIR/ms-playwright/"
+fi
+if [[ -d "$FRAMEWORKS_DIR" ]]; then
+  rm -rf "$FRAMEWORKS_DIR/ms-playwright"
+  ln -sfn ../Resources/ms-playwright "$FRAMEWORKS_DIR/ms-playwright"
+fi
+# 同步 onedir 产物（未包进 .app 时也可直接跑 dist/CreatorHub）
+if [[ -d "$DIST/CreatorHub/_internal" ]]; then
+  rm -rf "$DIST/CreatorHub/_internal/ms-playwright"
+  mkdir -p "$DIST/CreatorHub/_internal/ms-playwright"
+  cp -R "$BUNDLE_BROWSERS/chromium-${CHROMIUM_REV}" "$DIST/CreatorHub/_internal/ms-playwright/"
+  if [[ -n "${FFMPEG_REV}" && -d "$BUNDLE_BROWSERS/ffmpeg-${FFMPEG_REV}" ]]; then
+    cp -R "$BUNDLE_BROWSERS/ffmpeg-${FFMPEG_REV}" "$DIST/CreatorHub/_internal/ms-playwright/"
+  fi
 fi
 
 # 去掉隔离属性，便于本机试跑（未签名仍可能被 Gatekeeper 拦）
