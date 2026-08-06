@@ -13,9 +13,11 @@ import asyncio
 import json
 import os
 import re
+import subprocess
+import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 from playwright.async_api import BrowserContext, async_playwright
@@ -68,6 +70,71 @@ _STEALTH = [
     "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
     "--webrtc-ip-handling-policy=disable_non_proxied_udp",
 ]
+
+
+def _detect_screen_size() -> Optional[Tuple[int, int]]:
+    """探测当前主屏逻辑分辨率(CSS 像素; macOS Retina 用点而非物理像素)。"""
+    if sys.platform == "darwin":
+        # AppKit NSScreen.frame → 逻辑点(与 Playwright viewport 一致)
+        try:
+            out = subprocess.check_output(
+                ["osascript", "-l", "JavaScript", "-e",
+                 'ObjC.import("AppKit");'
+                 "var f=$.NSScreen.mainScreen.frame;"
+                 "f.size.width + \" \" + f.size.height"],
+                text=True, timeout=4,
+            )
+            parts = [int(float(x)) for x in out.split()]
+            if len(parts) >= 2 and parts[0] >= 800 and parts[1] >= 600:
+                return parts[0], parts[1]
+        except Exception:
+            pass
+        try:
+            out = subprocess.check_output(
+                ["osascript", "-e",
+                 'tell application "Finder" to get bounds of window of desktop'],
+                text=True, timeout=4,
+            )
+            parts = [int(x) for x in re.findall(r"-?\d+", out)]
+            if len(parts) >= 4:
+                w, h = parts[2] - parts[0], parts[3] - parts[1]
+                if w >= 800 and h >= 600:
+                    return w, h
+        except Exception:
+            pass
+        return None
+    try:
+        if sys.platform == "win32":
+            import ctypes
+            user32 = ctypes.windll.user32  # type: ignore[attr-defined]
+            w, h = int(user32.GetSystemMetrics(0)), int(user32.GetSystemMetrics(1))
+            if w >= 800 and h >= 600:
+                return w, h
+        else:
+            out = subprocess.check_output(["xdpyinfo"], text=True, timeout=4)
+            m = re.search(r"dimensions:\s*(\d+)x(\d+)", out)
+            if m:
+                w, h = int(m.group(1)), int(m.group(2))
+                if w >= 800 and h >= 600:
+                    return w, h
+    except Exception:
+        pass
+    return None
+
+
+def _headed_viewport() -> Tuple[Optional[Dict[str, int]], List[str]]:
+    """有头窗口:尽量铺满当前屏幕;探测失败则最大化并禁用固定 viewport。"""
+    extra = ["--start-maximized"]
+    size = _detect_screen_size()
+    if not size:
+        return None, extra
+    sw, sh = size
+    # 预留菜单栏 / Dock / 窗口边框,避免内容区被裁切
+    vw = max(1024, min(sw - 40, 3840))
+    vh = max(720, min(sh - 100, 2160))
+    extra.append(f"--window-size={vw},{vh}")
+    print(f"[browser] headed viewport={vw}x{vh} (screen={sw}x{sh})", flush=True)
+    return {"width": vw, "height": vh}, extra
 
 # storage_state 里允许注入的 Cookie 字段(playwright add_cookies 接受的键)
 _COOKIE_KEYS = ("name", "value", "domain", "path", "expires", "httpOnly", "secure", "sameSite")
@@ -253,10 +320,19 @@ class BrowserManager:
         pdir.mkdir(parents=True, exist_ok=True)
         was_empty = not any(pdir.iterdir())
         ua = self._normalize_ua(identity.ua or self.default_ua)
+        # 无头:继续用账号固定视口(指纹隔离);有头:适配当前屏幕,方便登录/Studio 操作
+        args = list(_STEALTH)
+        if headless:
+            viewport: Optional[Dict[str, int]] = {
+                "width": identity.viewport_w or 1280,
+                "height": identity.viewport_h or 800,
+            }
+        else:
+            viewport, extra = _headed_viewport()
+            args.extend(extra)
         kwargs: Dict[str, Any] = dict(
-            user_data_dir=str(pdir), headless=headless, args=_STEALTH,
+            user_data_dir=str(pdir), headless=headless, args=args,
             user_agent=ua,
-            viewport={"width": identity.viewport_w, "height": identity.viewport_h},
             locale=identity.locale or "zh-CN",
             timezone_id=identity.timezone_id or "Asia/Shanghai",
             # geolocation 伪造:坐标与代理 IP 归属地/时区对齐,并预授权定位权限
@@ -265,6 +341,11 @@ class BrowserManager:
             geolocation=identity.geolocation,
             permissions=["geolocation"],
         )
+        if viewport is None:
+            # 跟随真实窗口大小(配合 --start-maximized)
+            kwargs["no_viewport"] = True
+        else:
+            kwargs["viewport"] = viewport
         proxy = _parse_proxy(identity.proxy)
         if proxy:
             kwargs["proxy"] = proxy

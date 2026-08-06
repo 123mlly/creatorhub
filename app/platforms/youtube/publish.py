@@ -66,10 +66,16 @@ _NEXT_BTN = [
     '#next-button', 'ytcp-button#next-button',
     'button:has-text("Next")', 'button:has-text("下一步")',
 ]
+# 只点「发布」类按钮;刻意不含 Save/保存 —— 未选 Public 时 Done 常是 Save→Draft
 _PUBLISH_BTN = [
-    '#done-button', 'ytcp-button#done-button',
-    'button:has-text("Publish")', 'button:has-text("发布")',
-    'button:has-text("Save")', 'button:has-text("保存")',
+    'ytcp-button#done-button:has-text("Publish")',
+    'ytcp-button#done-button:has-text("发布")',
+    '#done-button:has-text("Publish")',
+    '#done-button:has-text("发布")',
+    'button:has-text("Publish")',
+    'button:has-text("发布")',
+    'ytcp-button#done-button',
+    '#done-button',
 ]
 _PUBLIC_RADIO = [
     '#privacy-radios tp-yt-paper-radio-button[name="PUBLIC"]',
@@ -267,13 +273,49 @@ async def _fill_description(page, text: str) -> bool:
     return False
 
 
-async def _select_public_visibility(page) -> bool:
-    """在 Visibility 步骤勾选 Public/公开。
+async def _public_is_checked(page) -> bool:
+    """严格确认 Public radio 已被 Studio 勾选(不只看我们是否点过)。"""
+    try:
+        pub = page.locator("tp-yt-paper-radio-button[name='PUBLIC']").first
+        if await pub.count() == 0:
+            return False
+        checked = await pub.get_attribute("aria-checked")
+        if checked == "true":
+            return True
+        # 部分版本用 selected / checked class
+        cls = (await pub.get_attribute("class") or "") + " " + (
+            await pub.get_attribute("aria-selected") or ""
+        )
+        if "iron-selected" in cls or "checked" in cls.lower():
+            return True
+    except Exception:
+        pass
+    try:
+        return bool(await page.evaluate(
+            """() => {
+              const walk = (root, acc=[]) => {
+                if (!root) return acc;
+                root.querySelectorAll &&
+                  root.querySelectorAll('tp-yt-paper-radio-button[name="PUBLIC"]').forEach(el => acc.push(el));
+                root.querySelectorAll && root.querySelectorAll('*').forEach(el => {
+                  if (el.shadowRoot) walk(el.shadowRoot, acc);
+                });
+                return acc;
+              };
+              const pubs = walk(document);
+              return pubs.some(el =>
+                el.getAttribute('aria-checked') === 'true' ||
+                el.getAttribute('aria-selected') === 'true' ||
+                (el.className || '').includes('iron-selected')
+              );
+            }"""
+        ))
+    except Exception:
+        return False
 
-    Studio 上传向导默认常不选可见性;点 Next 到末步或点步骤徽章 #step-badge-3,
-    再点 name=PUBLIC 的 paper-radio(必要时穿透点 #radio / radioLabel)。
-    """
-    # 直接跳到 Visibility 步骤(比连点 Next 稳)
+
+async def _goto_visibility_step(page) -> bool:
+    """进入 Visibility 步骤(步骤徽章或连点 Next)。"""
     for sel in ("#step-badge-3", "button#step-badge-3", "[id='step-badge-3']"):
         try:
             loc = page.locator(sel).first
@@ -285,7 +327,7 @@ async def _select_public_visibility(page) -> bool:
         except Exception:
             continue
     else:
-        for _ in range(6):
+        for _ in range(8):
             if await page.locator(
                 "#privacy-radios, ytcp-video-visibility-select, "
                 "tp-yt-paper-radio-button[name='PUBLIC']"
@@ -294,18 +336,33 @@ async def _select_public_visibility(page) -> bool:
             await _click_first(page, _NEXT_BTN, timeout=3000)
             await page.wait_for_timeout(900)
 
-    # 等 radio 组出现
-    for _ in range(15):
+    for _ in range(20):
         try:
             if await page.locator("tp-yt-paper-radio-button[name='PUBLIC']").count():
-                break
+                return True
             if await page.locator("#privacy-radios").count():
-                break
+                return True
         except Exception:
             pass
-        await page.wait_for_timeout(500)
+        await page.wait_for_timeout(400)
+    return False
 
-    # 1) Playwright 直接点
+
+async def _select_public_visibility(page) -> bool:
+    """在 Visibility 步骤勾选 Public/公开,并以 aria-checked 严格校验。
+
+    失败必须返回 False —— 调用方不得继续点 Done(否则会 Save 成 Draft)。
+    """
+    if not await _goto_visibility_step(page):
+        await _dump(page, "no_visibility_step")
+        _log("visibility step not reached")
+        return False
+
+    if await _public_is_checked(page):
+        _log("visibility=PUBLIC already checked")
+        return True
+
+    # 1) Playwright 直接点 radio
     for sel in (
         "tp-yt-paper-radio-button[name='PUBLIC']",
         "#privacy-radios tp-yt-paper-radio-button[name='PUBLIC']",
@@ -318,9 +375,8 @@ async def _select_public_visibility(page) -> bool:
                 continue
             await loc.scroll_into_view_if_needed(timeout=3000)
             await page.wait_for_timeout(200)
-            # 先点整颗,再点内部圆点/标签
             await loc.click(timeout=4000, force=True)
-            await page.wait_for_timeout(300)
+            await page.wait_for_timeout(350)
             for sub in ("#radio", "#offRadio", "#radioLabel", "#radioContainer"):
                 try:
                     inner = loc.locator(sub).first
@@ -329,15 +385,14 @@ async def _select_public_visibility(page) -> bool:
                         break
                 except Exception:
                     continue
-            await page.wait_for_timeout(400)
-            checked = await loc.get_attribute("aria-checked")
-            if checked == "true":
+            await page.wait_for_timeout(500)
+            if await _public_is_checked(page):
                 _log(f"visibility=PUBLIC via {sel}")
                 return True
         except Exception as e:
             _log(f"click {sel} failed: {e!r}")
 
-    # 2) 点「Public」/「Everyone can watch」文案
+    # 2) 点文案(必须再校验,不再 unverified 放行)
     for text in (
         "Everyone can watch your video",
         "Public",
@@ -348,23 +403,21 @@ async def _select_public_visibility(page) -> bool:
             loc = page.get_by_text(text, exact=False).first
             if await loc.count() and await loc.is_visible():
                 await loc.click(timeout=3000, force=True)
-                await page.wait_for_timeout(400)
-                pub = page.locator("tp-yt-paper-radio-button[name='PUBLIC']").first
-                if await pub.count() and (await pub.get_attribute("aria-checked")) == "true":
+                await page.wait_for_timeout(500)
+                if await _public_is_checked(page):
                     _log(f"visibility=PUBLIC via text={text!r}")
                     return True
-                # 文案点了也可能已生效但属性延迟
-                _log(f"visibility click text={text!r} (unverified)")
-                return True
+                _log(f"text={text!r} clicked but PUBLIC not checked")
         except Exception:
             continue
 
-    # 3) JS 强制 click(绕过遮挡/动画)
+    # 3) JS 真实 click(不伪造 aria-checked;点完再读属性)
     try:
         ok = await page.evaluate(
             """() => {
               const findAll = (root, acc=[]) => {
-                root.querySelectorAll && root.querySelectorAll('tp-yt-paper-radio-button').forEach(el => acc.push(el));
+                root.querySelectorAll &&
+                  root.querySelectorAll('tp-yt-paper-radio-button').forEach(el => acc.push(el));
                 root.querySelectorAll && root.querySelectorAll('*').forEach(el => {
                   if (el.shadowRoot) findAll(el.shadowRoot, acc);
                 });
@@ -372,33 +425,401 @@ async def _select_public_visibility(page) -> bool:
               };
               const radios = findAll(document);
               const pub = radios.find(r => (r.getAttribute('name') || '') === 'PUBLIC')
-                || radios.find(r => /public|公开/i.test(r.textContent || ''));
+                || radios.find(r => /\\bpublic\\b|公开/i.test(r.textContent || ''));
               if (!pub) return false;
               pub.scrollIntoView({block:'center'});
-              const inner = pub.querySelector('#radio, #offRadio, #radioContainer, #radioLabel');
-              (inner || pub).click();
+              const inner = pub.shadowRoot
+                ? (pub.shadowRoot.querySelector('#radio, #offRadio, #radioContainer') || pub)
+                : (pub.querySelector('#radio, #offRadio, #radioContainer, #radioLabel') || pub);
+              inner.click();
               pub.click();
-              pub.setAttribute('aria-checked', 'true');
-              pub.setAttribute('aria-selected', 'true');
-              pub.dispatchEvent(new Event('change', {bubbles:true}));
-              pub.dispatchEvent(new Event('click', {bubbles:true}));
+              // Polymer paper-radio 常靠 tap 事件
+              try {
+                pub.dispatchEvent(new CustomEvent('tap', {bubbles: true, composed: true}));
+                pub.dispatchEvent(new MouseEvent('click', {bubbles: true, composed: true}));
+              } catch (e) {}
               return true;
             }"""
         )
         if ok:
-            await page.wait_for_timeout(500)
-            pub = page.locator("tp-yt-paper-radio-button[name='PUBLIC']").first
-            if await pub.count():
-                checked = await pub.get_attribute("aria-checked")
-                _log(f"visibility=PUBLIC via JS evaluate (aria-checked={checked})")
-                # 即使属性未立刻变,也认为点过了
+            await page.wait_for_timeout(600)
+            if await _public_is_checked(page):
+                _log("visibility=PUBLIC via JS evaluate")
                 return True
+            _log("JS clicked PUBLIC but aria-checked still false")
     except Exception as e:
         _log(f"JS public select failed: {e!r}")
 
+    # 再试一次跳步骤 + 点击(偶发对话框未完全渲染)
+    await _goto_visibility_step(page)
+    await page.wait_for_timeout(800)
+    try:
+        loc = page.locator("tp-yt-paper-radio-button[name='PUBLIC']").first
+        if await loc.count():
+            await loc.click(timeout=4000, force=True)
+            await page.wait_for_timeout(600)
+            if await _public_is_checked(page):
+                _log("visibility=PUBLIC via retry click")
+                return True
+    except Exception:
+        pass
+
     await _dump(page, "no_public")
-    _log("visibility PUBLIC not selected")
+    _log("visibility PUBLIC not selected (strict)")
     return False
+
+
+async def _click_publish(page) -> bool:
+    """点 Publish/发布。若按钮仍是 Save/保存则拒绝点击,避免存成 Draft。"""
+    # 等 Done 按钮文案从 Save 变成 Publish(勾 Public 后会变)
+    for _ in range(12):
+        try:
+            done = page.locator("#done-button, ytcp-button#done-button").first
+            if await done.count():
+                label = (await done.inner_text(timeout=1500) or "").strip().lower()
+                _log(f"done-button label={label!r}")
+                if any(k in label for k in ("publish", "发布")):
+                    break
+                if any(k in label for k in ("save", "保存", "schedule", "定时")):
+                    # 可见性可能还没生效,稍等再读
+                    await page.wait_for_timeout(500)
+                    continue
+        except Exception:
+            pass
+        await page.wait_for_timeout(400)
+
+    # 优先精确 Publish 文案
+    for sel in _PUBLISH_BTN:
+        try:
+            loc = page.locator(sel).first
+            if await loc.count() == 0:
+                continue
+            label = ""
+            try:
+                label = (await loc.inner_text(timeout=1200) or "").strip()
+            except Exception:
+                pass
+            low = label.lower()
+            # 明确是保存/定时 → 跳过
+            if low and any(k in low for k in ("save", "保存", "schedule", "定时")) \
+                    and not any(k in low for k in ("publish", "发布")):
+                _log(f"skip done btn label={label!r} (would draft)")
+                continue
+            await loc.scroll_into_view_if_needed(timeout=2000)
+            await loc.click(timeout=5000, force=True)
+            _log(f"clicked publish via {sel} label={label!r}")
+            return True
+        except Exception as e:
+            _log(f"publish click {sel} failed: {e!r}")
+
+    # 最后兜底:get_by_role / 文案
+    for text in ("Publish", "发布"):
+        try:
+            loc = page.get_by_role("button", name=re.compile(text, re.I)).first
+            if await loc.count() and await loc.is_visible():
+                await loc.click(timeout=4000, force=True)
+                _log(f"clicked publish via role name={text!r}")
+                return True
+        except Exception:
+            continue
+        try:
+            loc = page.get_by_text(text, exact=True).first
+            if await loc.count() and await loc.is_visible():
+                await loc.click(timeout=4000, force=True)
+                _log(f"clicked publish via text={text!r}")
+                return True
+        except Exception:
+            continue
+    return False
+
+
+# 二次确认 / 发布成功文案
+# 注意:草稿阶段也可能出现 youtu.be,不能「只靠链接」判成功;
+# 但「已勾 Public + 已点 Publish」之后,向导关闭 / 分享框 / 处理中 都可视为成功。
+_PUBLISH_CONFIRM_BTN = [
+    'ytcp-button#publish-button',
+    '#publish-button',
+    'tp-yt-paper-dialog #publish-button',
+    'tp-yt-paper-dialog ytcp-button:has-text("Publish")',
+    'tp-yt-paper-dialog ytcp-button:has-text("发布")',
+    'ytcp-confirmation-dialog ytcp-button:has-text("Publish")',
+    'ytcp-confirmation-dialog ytcp-button:has-text("发布")',
+    'ytcp-dialog ytcp-button:has-text("Publish")',
+    'ytcp-dialog ytcp-button:has-text("发布")',
+]
+_PUBLISH_SUCCESS_TEXT = (
+    "Video published",
+    "Short published",
+    "Your video has been published",
+    "Your video went live",
+    "Your video is now live",
+    "Video is published",
+    "published successfully",
+    "视频已发布",
+    "短视频已发布",
+    "已成功发布",
+    "已发布到 YouTube",
+    "已发布到 Youtube",
+    "已发布到YouTube",
+    "发布成功",
+)
+# 中间态:已提交但仍在转码 —— 还不算最终成功,需等到 Video published
+_PROCESSING_TEXT = (
+    "Video processing",
+    "视频处理中",
+    "Processing up to",
+    "needs to finish processing",
+    "before your video is public",
+    "Your video is being processed",
+    "正在处理你的视频",
+    "正在处理您的视频",
+    "视频正在处理",
+)
+_DRAFT_SAVED_TEXT = (
+    "saved as a draft",
+    "Saved as draft",
+    "已存为草稿",
+    "保存为草稿",
+    "已保存为草稿",
+)
+# 最终成功弹框:「Video published」+ Share a link / Video link
+_VIDEO_PUBLISHED_DIALOG = (
+    "ytcp-video-share-dialog",
+    "tp-yt-paper-dialog:has-text('Video published')",
+    "tp-yt-paper-dialog:has-text('Short published')",
+    "tp-yt-paper-dialog:has-text('视频已发布')",
+    "tp-yt-paper-dialog:has-text('短视频已发布')",
+    "ytcp-dialog:has-text('Video published')",
+    "ytcp-dialog:has-text('Short published')",
+    "ytcp-dialog:has-text('视频已发布')",
+    "#dialog-title:has-text('Video published')",
+    "#dialog-title:has-text('Short published')",
+)
+
+async def _confirm_publish_dialog(page) -> bool:
+    """处理点 Publish 后的二次确认框(Publish video?)。未点确认则仍是草稿。"""
+    clicked = False
+    for attempt in range(10):
+        # 已出现成功文案则无需再点
+        if await _has_publish_success_banner(page):
+            return True
+        for sel in _PUBLISH_CONFIRM_BTN:
+            try:
+                loc = page.locator(sel).first
+                if await loc.count() == 0:
+                    continue
+                if not await loc.is_visible():
+                    continue
+                label = ""
+                try:
+                    label = (await loc.inner_text(timeout=800) or "").strip()
+                except Exception:
+                    pass
+                low = label.lower()
+                if low and any(k in low for k in ("save", "保存", "cancel", "取消", "close", "关闭")):
+                    continue
+                await loc.click(timeout=3000, force=True)
+                _log(f"clicked publish confirm via {sel} label={label!r}")
+                clicked = True
+                await page.wait_for_timeout(800)
+                break
+            except Exception:
+                continue
+        if clicked:
+            # 有时确认框要再点一次
+            await page.wait_for_timeout(600)
+            if await _has_publish_success_banner(page):
+                return True
+            # 再扫一轮确认按钮(第二层)
+            for sel in _PUBLISH_CONFIRM_BTN:
+                try:
+                    loc = page.locator(sel).first
+                    if await loc.count() and await loc.is_visible():
+                        await loc.click(timeout=2500, force=True)
+                        _log(f"clicked publish confirm again via {sel}")
+                        return True
+                except Exception:
+                    continue
+            return True
+        # 无独立确认框时,也可能仍停在 done-button=Publish(点了没生效)
+        try:
+            done = page.locator("#done-button, ytcp-button#done-button").first
+            if await done.count() and await done.is_visible():
+                label = (await done.inner_text(timeout=800) or "").strip().lower()
+                if any(k in label for k in ("publish", "发布")):
+                    await done.click(timeout=3000, force=True)
+                    _log("re-clicked done-button Publish (no separate confirm dialog)")
+                    clicked = True
+                    await page.wait_for_timeout(800)
+                    continue
+        except Exception:
+            pass
+        await page.wait_for_timeout(500)
+    return clicked
+
+
+async def _has_draft_saved_notice(page) -> bool:
+    for kw in _DRAFT_SAVED_TEXT:
+        try:
+            loc = page.get_by_text(kw, exact=False).first
+            if await loc.count() and await loc.is_visible():
+                return True
+        except Exception:
+            continue
+    return False
+
+
+async def _has_video_published_dialog(page) -> bool:
+    """最终成功:「Video published」分享弹框(含 Share a link / Video link)。"""
+    for sel in _VIDEO_PUBLISHED_DIALOG:
+        try:
+            loc = page.locator(sel).first
+            if await loc.count() == 0 or not await loc.is_visible():
+                continue
+            txt = ""
+            try:
+                txt = (await loc.inner_text(timeout=1200) or "").lower()
+            except Exception:
+                txt = ""
+            # share dialog 组件本身即成功;其它 dialog 需含 published 文案
+            if "ytcp-video-share-dialog" in sel:
+                _log(f"published dialog hit: {sel}")
+                return True
+            if any(k in txt for k in (
+                "video published", "short published", "视频已发布", "短视频已发布",
+                "share a link", "video link", "分享链接",
+            )):
+                _log(f"published dialog hit: {sel}")
+                return True
+        except Exception:
+            continue
+    # 泛匹配可见 dialog
+    try:
+        dialogs = page.locator(
+            "tp-yt-paper-dialog:visible, ytcp-dialog:visible, "
+            "ytcp-video-share-dialog:visible"
+        )
+        n = await dialogs.count()
+        for i in range(min(n, 6)):
+            try:
+                txt = (await dialogs.nth(i).inner_text(timeout=1000) or "").lower()
+            except Exception:
+                continue
+            # 必须是 published,不能是 processing
+            if "processing" in txt and "published" not in txt and "已发布" not in txt:
+                continue
+            if any(k in txt for k in (
+                "video published", "short published", "视频已发布", "短视频已发布",
+            )):
+                _log("published dialog hit via dialog text")
+                return True
+            # Share a link + Video link 组合(标题可能本地化差异)
+            if ("share a link" in txt or "分享" in txt) and (
+                "video link" in txt or "youtu.be/" in txt or "/shorts/" in txt
+                or "youtube.com/" in txt
+            ):
+                _log("published dialog hit via share+link")
+                return True
+    except Exception:
+        pass
+    return False
+
+
+async def _has_processing_dialog(page) -> bool:
+    """中间态 Video processing(已提交,转码中)。"""
+    for kw in _PROCESSING_TEXT:
+        try:
+            loc = page.get_by_text(kw, exact=False).first
+            if await loc.count() and await loc.is_visible():
+                return True
+        except Exception:
+            continue
+    try:
+        for sel in (
+            "tp-yt-paper-dialog:has-text('Video processing')",
+            "ytcp-dialog:has-text('Video processing')",
+            "ytcp-uploads-still-processing-dialog",
+        ):
+            loc = page.locator(sel).first
+            if await loc.count() and await loc.is_visible():
+                return True
+    except Exception:
+        pass
+    return False
+
+
+async def _has_publish_success_banner(page) -> bool:
+    """最终成功文案或 Video published 弹框。"""
+    if await _has_video_published_dialog(page):
+        return True
+    for kw in _PUBLISH_SUCCESS_TEXT:
+        try:
+            loc = page.get_by_text(kw, exact=False).first
+            if await loc.count() and await loc.is_visible():
+                # 避免「before your video is public」这类 processing 文案误命中
+                _log(f"success text hit: {kw!r}")
+                return True
+        except Exception:
+            continue
+    return False
+
+
+async def _detect_post_publish_success(page) -> Tuple[bool, str]:
+    """在「已勾 Public + 已点 Publish」之后判定是否成功。
+
+    仅「Video published」分享弹框(或等价成功文案)算成功。
+    Video processing 只是中间态,继续等待。
+    """
+    if await _has_draft_saved_notice(page):
+        return False, "draft_notice"
+    if await _has_video_published_dialog(page):
+        return True, "video_published_dialog"
+    if await _has_publish_success_banner(page):
+        return True, "published_banner"
+    if await _has_processing_dialog(page):
+        return False, "processing"  # 继续等,不算成功也不算失败
+    return False, "pending"
+
+
+async def _extract_result_url(page) -> str:
+    """从页面抓分享链接;草稿阶段也可能有。"""
+    try:
+        for sel in (
+            "a[href*='youtu.be/']",
+            "a[href*='youtube.com/watch']",
+            "a[href*='youtube.com/shorts/']",
+            "a[href*='studio.youtube.com/video/']",
+            "input[value*='youtu.be/']",
+            "input[value*='youtube.com/']",
+        ):
+            loc = page.locator(sel).first
+            if await loc.count() == 0:
+                continue
+            href = ""
+            try:
+                href = await loc.get_attribute("href") or ""
+            except Exception:
+                href = ""
+            if not href:
+                try:
+                    href = await loc.get_attribute("value") or ""
+                except Exception:
+                    href = ""
+            if not href:
+                continue
+            if href.startswith("//"):
+                href = "https:" + href
+            elif href.startswith("/"):
+                href = "https://www.youtube.com" + href
+            m = re.search(r"(?:youtu\.be/|watch\?v=|shorts/|video/)([A-Za-z0-9_-]{11})", href)
+            if m and "youtu" not in href[:20].lower():
+                href = f"https://www.youtube.com/watch?v={m.group(1)}"
+            elif m and "/video/" in href:
+                href = f"https://www.youtube.com/watch?v={m.group(1)}"
+            return href
+    except Exception:
+        pass
+    return ""
 
 
 async def _answer_made_for_kids(page, made_for_kids: bool = False) -> bool:
@@ -533,65 +954,101 @@ async def publish_youtube(mgr: BrowserManager, identity: Identity,
             except Exception:
                 pass
 
-        # 选公开(必须先到 Visibility 步骤)
+        # 选公开:必须严格勾上,否则绝不能点 Done(否则常变成 Save→Draft)
         if not await _select_public_visibility(page):
             await _dump(page, "no_public")
-            _log("warn: failed to select Public; publish may stay Private/Unlisted")
+            return False, "", (
+                "未能勾选 Public/公开(请到弹出窗口手动选「公开」再点「发布」;"
+                "调试截图见 data/debug/)。未自动点保存,避免变成草稿。"
+            )
+        # 再确认一次,防止点完又被 Studio 重置
+        await page.wait_for_timeout(400)
+        if not await _public_is_checked(page):
+            await _dump(page, "public_lost")
+            return False, "", (
+                "Public 勾选未保持(请到弹出窗口确认可见性为「公开」后手动发布)"
+            )
 
-        if not await _click_first(page, _PUBLISH_BTN, timeout=6000):
+        if not await _click_publish(page):
             await _dump(page, "no_publish")
-            return False, "", "未找到发布/完成按钮(请到弹出窗口手动选 Public 并点 Publish)"
+            return False, "", (
+                "未找到「发布」按钮(当前可能仍是「保存」草稿。"
+                "请确认已选 Public 后在弹出窗口手动点 Publish)"
+            )
 
-        # 等成功:链接 / 文案
-        deadline = timeout_seconds
+        # 二次确认(Publish video?)——漏点则可能仍是 Draft
+        await page.wait_for_timeout(800)
+        await _confirm_publish_dialog(page)
+
+        # 转码可能较久;看到 Video processing 后继续等到 Video published
+        deadline = max(timeout_seconds, 180)
         waited = 0
+        success_reason = ""
+        saw_processing = False
         while waited < deadline:
-            # 抓结果链接
-            try:
-                for sel in (
-                    "a[href*='youtu.be/']",
-                    "a[href*='youtube.com/watch']",
-                    "a[href*='youtube.com/shorts/']",
-                    "a[href*='studio.youtube.com/video/']",
-                ):
-                    loc = page.locator(sel).first
-                    if await loc.count():
-                        href = await loc.get_attribute("href") or ""
-                        if href:
-                            if href.startswith("//"):
-                                href = "https:" + href
-                            elif href.startswith("/"):
-                                href = "https://www.youtube.com" + href
-                            # studio edit → watch
-                            m = re.search(r"/video/([A-Za-z0-9_-]{11})", href)
-                            if m:
-                                href = f"https://www.youtube.com/watch?v={m.group(1)}"
-                            result_url = href
-                            ok = True
-                            break
-                if ok:
-                    break
-            except Exception:
-                pass
-            for kw in ("Video published", "已发布", "Published", "上传完毕", "Processing"):
-                try:
-                    if await page.get_by_text(kw, exact=False).first.is_visible():
-                        ok = True
-                        break
-                except Exception:
-                    continue
-            if ok:
+            passed, reason = await _detect_post_publish_success(page)
+            if reason == "draft_notice":
+                await _dump(page, "saved_draft")
+                return False, "", "Studio 将视频存为草稿(发布未真正提交),请在窗口里重选公开并发布"
+            if reason == "processing":
+                if not saw_processing:
+                    _log("Video processing dialog — waiting for Video published…")
+                    saw_processing = True
+            if passed:
+                ok = True
+                success_reason = reason
+                result_url = await _extract_result_url(page) or result_url
+                _log(f"publish confirmed via {reason}")
                 break
+            # 确认框还在就继续点
+            if waited in (2, 6, 12, 20):
+                await _confirm_publish_dialog(page)
+            if not result_url:
+                result_url = await _extract_result_url(page)
             await page.wait_for_timeout(2000)
             waited += 2
 
         if ok and not result_url:
-            result_url = page.url
+            result_url = await _extract_result_url(page) or page.url
         if not ok:
-            await _dump(page, "uncertain")
-            error = "已点发布但未确认成功(请到 YouTube Studio 确认;调试截图见 data/debug/)"
-        else:
-            _log(f"publish ok url={result_url}")
+            # 仅当最终出现 Video published 才算成功;processing / 仅有链接都不够
+            if await _has_video_published_dialog(page):
+                ok = True
+                success_reason = "video_published_late"
+                result_url = await _extract_result_url(page) or result_url
+                _log(f"publish ok via {success_reason}")
+            else:
+                await _dump(page, "uncertain")
+                if saw_processing:
+                    error = (
+                        "已出现 Video processing,但超时未等到「Video published」分享弹框"
+                        f"{('；链接 ' + result_url) if result_url else ''}。"
+                        "请到 Studio 确认是否已公开;调试截图见 data/debug/"
+                    )
+                else:
+                    error = (
+                        "已点 Publish 但未看到「Video published」确认弹框"
+                        f"{('；链接 ' + result_url) if result_url else ''}。"
+                        "请到 Studio 确认;调试截图见 data/debug/"
+                    )
+        if ok:
+            # 关掉成功弹框(忽略失败)
+            try:
+                for sel in (
+                    "tp-yt-paper-dialog tp-yt-paper-button:has-text('Close')",
+                    "ytcp-dialog tp-yt-paper-button:has-text('Close')",
+                    "ytcp-video-share-dialog button:has-text('Close')",
+                    "button:has-text('Close')",
+                    "button:has-text('关闭')",
+                ):
+                    loc = page.locator(sel).first
+                    if await loc.count() and await loc.is_visible():
+                        await loc.click(timeout=2000, force=True)
+                        break
+            except Exception:
+                pass
+            await page.wait_for_timeout(1500)
+            _log(f"publish ok ({success_reason or 'ok'}) url={result_url}")
     except Exception as e:
         error = f"发布异常: {e!r}"
         try:

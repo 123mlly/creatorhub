@@ -764,7 +764,11 @@ async function startYoutubeLogin() {
   $("qrstatus").textContent = "正在打开 YouTube 窗口…";
   try {
     const res = await api(loginStartUrl("/api/login/youtube/start", proxy), { method: "POST" });
-    $("qrstatus").innerHTML = "🪟 已弹出 <b>YouTube</b> 窗口,请在其中完成 <b>Google 登录</b>(可用于年龄限制/会员内容下载)。<br>登录成功后稍等一两秒再关窗口,这里会自动刷新。";
+    $("qrstatus").innerHTML = "🪟 已弹出 <b>YouTube</b> 窗口（选好后会<b>自动关窗</b>，不用你手动关）。<br>"
+      + "① 先完成 <b>Google 登录</b><br>"
+      + "② 登录后会打开<b>频道切换页</b>——点选要绑定的频道<br>"
+      + "③ 选好后稍等几秒，系统会进 Studio、保存登录态并自动关掉窗口。<br>"
+      + "<span style='opacity:.85'>每个频道再登一次可选不同频道，对应多条 YouTube 账号。</span>";
     pollLogin(res.task_id);
   } catch (e) { $("qrstatus").textContent = "启动失败: " + e.message; toast("YouTube 登录启动失败:" + e.message, "err"); }
 }

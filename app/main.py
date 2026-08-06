@@ -551,7 +551,7 @@ async def login_youtube_start(proxy: str = "auto"):
     login_tasks[task_id] = {"status": "opening"}
     asyncio.create_task(_run_login(task_id, platform="youtube", proxy_choice=proxy))
     return {"task_id": task_id, "status": "opening",
-            "hint": "已打开 YouTube 窗口,请在其中完成 Google 登录"}
+            "hint": "已打开 YouTube 窗口:先完成 Google 登录,再在频道列表里点选要绑定的频道"}
 
 
 @app.post("/api/login/cookie")

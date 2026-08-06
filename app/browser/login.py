@@ -526,14 +526,22 @@ async def _read_nickname(page) -> str:
 
 # YouTube / Google 登录成功常见 Cookie
 _YT_LOGIN_COOKIES = {"SID", "HSID", "SSID", "APISID", "SAPISID", "LOGIN_INFO", "__Secure-1PSID"}
+_YT_CHANNEL_SWITCHER = "https://www.youtube.com/channel_switcher"
+_YT_STUDIO = "https://studio.youtube.com/"
 
 
 async def interactive_youtube_login(mgr: BrowserManager, identity: Identity,
-                                    timeout_seconds: int = 300,
-                                    start_url: str = "https://www.youtube.com/"
+                                    timeout_seconds: int = 360,
+                                    start_url: str = "https://www.youtube.com/",
+                                    channel_pick_seconds: int = 180
                                     ) -> Tuple[bool, str, str]:
-    """YouTube 浏览器登录。打开窗口让用户完成 Google 登录,落地 Cookie。
-    返回 (是否成功, storage_state_json, nickname)。判定:出现 SID/LOGIN_INFO 等登录 Cookie。"""
+    """YouTube 浏览器登录。打开窗口让用户完成 Google 登录,并选择频道后落地 Cookie。
+
+    同一 Google 下可有多频道(Brand Account)。登录成功后会打开频道切换页,
+    等用户点选目标频道再保存 —— 否则会落成默认频道。
+
+    返回 (是否成功, storage_state_json, nickname)。
+    """
     ctx = await mgr.open_headed(identity)
     page = await ctx.new_page()
     await _focus(page)
@@ -551,7 +559,9 @@ async def interactive_youtube_login(mgr: BrowserManager, identity: Identity,
             except Exception:
                 continue
         waited = 0
-        while waited < timeout_seconds:
+        # 预留频道选择时间,避免 Google 登录阶段把总超时耗尽
+        google_budget = max(60, timeout_seconds - channel_pick_seconds)
+        while waited < google_budget:
             if page.is_closed():
                 break
             try:
@@ -563,7 +573,6 @@ async def interactive_youtube_login(mgr: BrowserManager, identity: Identity,
             if "LOGIN_INFO" in names or (
                 "SID" in names and ("SAPISID" in names or "__Secure-1PSID" in names)
             ):
-                # 确认落在 youtube 域
                 yt_hosts = {c.get("domain", "") for c in cookies
                             if c.get("name") in _YT_LOGIN_COOKIES}
                 if any("youtube" in d or "google" in d for d in yt_hosts):
@@ -572,15 +581,12 @@ async def interactive_youtube_login(mgr: BrowserManager, identity: Identity,
             await asyncio.sleep(2)
             waited += 2
         if logged:
-            await page.wait_for_timeout(1500)
-            # 尽量回到 youtube 主页再读昵称
-            try:
-                await page.goto("https://www.youtube.com/", wait_until="domcontentloaded",
-                                timeout=20000)
-            except Exception:
-                pass
+            await page.wait_for_timeout(1000)
+            # 打开频道切换页,让用户选择要绑定的频道
+            await _wait_youtube_channel_pick(page, timeout_seconds=channel_pick_seconds)
+            # 用 Studio 读当前频道名(比主站头像更准)
+            nickname = await _read_youtube_channel_label(page)
             state_json = json.dumps(await ctx.storage_state())
-            nickname = await _read_youtube_nickname(page)
     finally:
         try:
             await ctx.close()
@@ -589,19 +595,91 @@ async def interactive_youtube_login(mgr: BrowserManager, identity: Identity,
     return logged, state_json, nickname
 
 
-async def _read_youtube_nickname(page) -> str:
+async def _wait_youtube_channel_pick(page, timeout_seconds: int = 240) -> None:
+    """打开频道切换页并等待用户点选。
+
+    判定选好:离开 channel_switcher / 进入 Studio 某频道 / 或超时后用当前默认频道。
+    """
     try:
-        # 头像按钮 title / aria-label 常带账号名
-        for sel in ('#avatar-btn', 'button#avatar-btn',
-                    'yt-img-shadow#avatar img', '#account-name'):
-            try:
-                el = page.locator(sel).first
-                for attr in ("alt", "title", "aria-label"):
-                    v = await el.get_attribute(attr, timeout=800)
-                    if v and v.strip() and "avatar" not in v.lower():
-                        return v.strip()[:40]
-            except Exception:
-                continue
+        await page.goto(_YT_CHANNEL_SWITCHER, wait_until="domcontentloaded", timeout=45000)
+    except Exception:
+        try:
+            # 兜底:进 Studio,用户可点头像切换频道
+            await page.goto(_YT_STUDIO, wait_until="domcontentloaded", timeout=45000)
+        except Exception:
+            return
+    await _focus(page)
+    await page.wait_for_timeout(1200)
+
+    # 若已在 switcher,等用户点某一频道(URL 离开 switcher / 进入 Studio)
+    waited = 0
+    saw_switcher = "channel_switcher" in (page.url or "")
+    stable_away = 0
+    while waited < timeout_seconds:
+        if page.is_closed():
+            return
+        url = (page.url or "").lower()
+        on_switcher = ("channel_switcher" in url or "account_switcher" in url
+                       or url.rstrip("/").endswith("youtube.com/account"))
+        if saw_switcher and not on_switcher:
+            # 离开切换页后稍等落地,避免点太快还没切完
+            stable_away += 1
+            if stable_away >= 2:  # ~4s
+                break
+        else:
+            stable_away = 0
+            if on_switcher or "channel_switcher" in url:
+                saw_switcher = True
+        # 已进 Studio(含带 UC 频道 id),视为选好
+        if "studio.youtube.com" in url and not on_switcher:
+            break
+        await asyncio.sleep(2)
+        waited += 2
+
+    # 最终落到 Studio,固化当前频道上下文,然后由外层 finally 自动关窗
+    try:
+        if "studio.youtube.com" not in (page.url or ""):
+            await page.goto(_YT_STUDIO, wait_until="domcontentloaded", timeout=30000)
+        await page.wait_for_timeout(1500)
     except Exception:
         pass
+
+
+async def _read_youtube_channel_label(page) -> str:
+    """读取当前选中频道名称(优先 Studio)。"""
+    try:
+        if "studio.youtube.com" not in (page.url or ""):
+            await page.goto(_YT_STUDIO, wait_until="domcontentloaded", timeout=30000)
+            await page.wait_for_timeout(2500)
+    except Exception:
+        pass
+    for sel in (
+        "#entity-name",
+        "ytcp-entity-name #entity-name",
+        "#channel-name",
+        "ytcp-channel-name #text",
+        "#avatar-btn",
+        "button#avatar-btn",
+        "yt-img-shadow#avatar img",
+        "#account-name",
+    ):
+        try:
+            el = page.locator(sel).first
+            if await el.count() == 0:
+                continue
+            for attr in ("title", "alt", "aria-label"):
+                try:
+                    v = await el.get_attribute(attr, timeout=800)
+                except Exception:
+                    v = None
+                if v and v.strip() and "avatar" not in v.lower():
+                    return v.strip()[:60]
+            try:
+                t = (await el.inner_text(timeout=800) or "").strip()
+                if t:
+                    return t[:60]
+            except Exception:
+                pass
+        except Exception:
+            continue
     return ""
