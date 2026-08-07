@@ -563,7 +563,8 @@ _PUBLISH_SUCCESS_TEXT = (
     "已发布到YouTube",
     "发布成功",
 )
-# 中间态:已提交但仍在转码 —— 还不算最终成功,需等到 Video published
+# 中间态:已提交但仍在转码。优先等 Video published;连续满 _PROCESSING_SUCCESS_SECONDS 也可判成功
+_PROCESSING_SUCCESS_SECONDS = 30
 _PROCESSING_TEXT = (
     "Video processing",
     "视频处理中",
@@ -767,8 +768,10 @@ async def _has_publish_success_banner(page) -> bool:
 async def _detect_post_publish_success(page) -> Tuple[bool, str]:
     """在「已勾 Public + 已点 Publish」之后判定是否成功。
 
-    仅「Video published」分享弹框(或等价成功文案)算成功。
-    Video processing 只是中间态,继续等待。
+    优先级:
+    1) 草稿提示 → 失败信号 draft_notice
+    2) 「Video published」分享弹框 / 等价成功文案 → 立刻成功
+    3) Video processing → 中间态(由外层累计连续时长,满 30s 可兜底成功)
     """
     if await _has_draft_saved_notice(page):
         return False, "draft_notice"
@@ -777,7 +780,7 @@ async def _detect_post_publish_success(page) -> Tuple[bool, str]:
     if await _has_publish_success_banner(page):
         return True, "published_banner"
     if await _has_processing_dialog(page):
-        return False, "processing"  # 继续等,不算成功也不算失败
+        return False, "processing"
     return False, "pending"
 
 
@@ -980,54 +983,74 @@ async def publish_youtube(mgr: BrowserManager, identity: Identity,
         await page.wait_for_timeout(800)
         await _confirm_publish_dialog(page)
 
-        # 转码可能较久;看到 Video processing 后继续等到 Video published
+        # Video published 优先;否则 Video processing 连续满 30s 也算成功(发布已提交,仅在转码)
         deadline = max(timeout_seconds, 180)
+        poll_s = 2
         waited = 0
         success_reason = ""
         saw_processing = False
+        processing_streak = 0  # 连续看到 processing 的秒数
         while waited < deadline:
             passed, reason = await _detect_post_publish_success(page)
             if reason == "draft_notice":
                 await _dump(page, "saved_draft")
                 return False, "", "Studio 将视频存为草稿(发布未真正提交),请在窗口里重选公开并发布"
-            if reason == "processing":
-                if not saw_processing:
-                    _log("Video processing dialog — waiting for Video published…")
-                    saw_processing = True
             if passed:
                 ok = True
                 success_reason = reason
                 result_url = await _extract_result_url(page) or result_url
                 _log(f"publish confirmed via {reason}")
                 break
+            if reason == "processing":
+                if not saw_processing:
+                    _log(
+                        "Video processing dialog — waiting for Video published "
+                        f"or {_PROCESSING_SUCCESS_SECONDS}s continuous processing…"
+                    )
+                    saw_processing = True
+                processing_streak += poll_s
+                if processing_streak >= _PROCESSING_SUCCESS_SECONDS:
+                    ok = True
+                    success_reason = f"processing_stable_{_PROCESSING_SUCCESS_SECONDS}s"
+                    result_url = await _extract_result_url(page) or result_url
+                    _log(f"publish confirmed via {success_reason}")
+                    break
+            else:
+                # 非 processing 则打断「持续」计时(短暂闪烁会重置)
+                processing_streak = 0
             # 确认框还在就继续点
             if waited in (2, 6, 12, 20):
                 await _confirm_publish_dialog(page)
             if not result_url:
                 result_url = await _extract_result_url(page)
-            await page.wait_for_timeout(2000)
-            waited += 2
+            await page.wait_for_timeout(poll_s * 1000)
+            waited += poll_s
 
         if ok and not result_url:
             result_url = await _extract_result_url(page) or page.url
         if not ok:
-            # 仅当最终出现 Video published 才算成功;processing / 仅有链接都不够
             if await _has_video_published_dialog(page):
                 ok = True
                 success_reason = "video_published_late"
+                result_url = await _extract_result_url(page) or result_url
+                _log(f"publish ok via {success_reason}")
+            elif await _has_processing_dialog(page) and processing_streak >= _PROCESSING_SUCCESS_SECONDS:
+                ok = True
+                success_reason = f"processing_stable_{_PROCESSING_SUCCESS_SECONDS}s_late"
                 result_url = await _extract_result_url(page) or result_url
                 _log(f"publish ok via {success_reason}")
             else:
                 await _dump(page, "uncertain")
                 if saw_processing:
                     error = (
-                        "已出现 Video processing,但超时未等到「Video published」分享弹框"
+                        f"已出现 Video processing,但未连续满 {_PROCESSING_SUCCESS_SECONDS}s,"
+                        "也未等到「Video published」"
                         f"{('；链接 ' + result_url) if result_url else ''}。"
                         "请到 Studio 确认是否已公开;调试截图见 data/debug/"
                     )
                 else:
                     error = (
-                        "已点 Publish 但未看到「Video published」确认弹框"
+                        "已点 Publish 但未看到「Video published」确认弹框,也未出现稳定转码提示"
                         f"{('；链接 ' + result_url) if result_url else ''}。"
                         "请到 Studio 确认;调试截图见 data/debug/"
                     )
