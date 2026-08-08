@@ -663,6 +663,13 @@
     color:var(--mut-2); background:var(--surface-2); border:1px solid var(--line-soft); border-radius:7px;
   }
   .content-cover-empty svg { width:18px; height:18px; }
+  .content-cover-empty.playable,
+  .content-cover-cell .thumb.playable {
+    cursor:pointer; color:var(--accent); border-color:color-mix(in srgb, var(--accent) 35%, var(--line-soft));
+  }
+  .content-cover-empty.playable:hover {
+    background:color-mix(in srgb, var(--accent) 12%, var(--surface-2));
+  }
   .content-desc-cell { white-space:normal; min-width:0; }
   .content-desc-text {
     display:-webkit-box; overflow:hidden; -webkit-box-orient:vertical; -webkit-line-clamp:3;

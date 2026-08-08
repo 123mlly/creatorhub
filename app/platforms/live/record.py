@@ -141,6 +141,49 @@ async def extract_douyin_stream_url(
             pass
 
 
+def live_cover_path_for(video_path: str) -> Path:
+    """直播视频旁的封面路径: xxx.mp4 → xxx.cover.jpg"""
+    p = Path(video_path)
+    return p.with_name(p.stem + ".cover.jpg")
+
+
+def extract_cover_frame_sync(
+    video_path: str,
+    *,
+    seek_sec: float = 2.0,
+) -> Tuple[bool, str, str]:
+    """从视频抽一帧作封面。成功返回 (True, jpg_path, '')。"""
+    src = Path(video_path)
+    if not src.exists() or src.stat().st_size < 1024:
+        return False, "", "视频不存在或过小"
+    ff = _ffmpeg_bin()
+    if not ff:
+        return False, "", "未找到 ffmpeg"
+    dst = live_cover_path_for(str(src))
+    if dst.exists() and dst.stat().st_size > 200:
+        return True, str(dst), ""
+    seeks = [max(0.0, float(seek_sec)), 0.0, 5.0, 10.0]
+    last_err = ""
+    for ss in seeks:
+        cmd = [
+            ff, "-hide_banner", "-loglevel", "error", "-y",
+            "-ss", str(ss),
+            "-i", str(src),
+            "-frames:v", "1",
+            "-q:v", "3",
+            str(dst),
+        ]
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            if dst.exists() and dst.stat().st_size > 200:
+                log.info("live cover ok %s → %s", src.name, dst.name)
+                return True, str(dst), ""
+            last_err = (proc.stderr or proc.stdout or "抽帧失败")[-200:]
+        except Exception as exc:
+            last_err = str(exc)[:200]
+    return False, "", last_err or "抽帧失败"
+
+
 def remux_to_mp4_sync(src_path: str, *, delete_src: bool = True) -> Tuple[bool, str, str]:
     """把 flv/ts 等无损转封装为 mp4。成功返回 (True, mp4_path, '')。"""
     src = Path(src_path)

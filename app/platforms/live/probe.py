@@ -153,6 +153,7 @@ _DOUYIN_LIVE_PROBE_JS = """() => {
   const liveText = /直播中/.test(txt);
   let roomId = '';
   let webRid = '';
+  let cover = '';
   const mRoom = html.match(/"(?:room_id|roomId)"\\s*:\\s*"?(\\d{6,})"?/);
   if (mRoom) roomId = mRoom[1];
   const mRid = html.match(/"(?:web_rid|webRid)"\\s*:\\s*"([^"]+)"/);
@@ -169,12 +170,31 @@ _DOUYIN_LIVE_PROBE_JS = """() => {
       if (/\"live_status\"\\s*:\\s*2/.test(decoded) || /\"status\"\\s*:\\s*2/.test(decoded)) {
         // status 2 常见为直播中
       }
+      const coverKeys = [
+        /"cover"\\s*:\\s*\\{\\s*"url_list"\\s*:\\s*\\[\\s*"(https?:[^"]+)"/,
+        /"(?:origin_cover|dynamic_cover|cover_url)"\\s*:\\s*\\{\\s*"url_list"\\s*:\\s*\\[\\s*"(https?:[^"]+)"/,
+        /"(?:cover|coverUrl|cover_url|room_cover)"\\s*:\\s*"(https?:[^"]+)"/,
+      ];
+      for (const re of coverKeys) {
+        const m = decoded.match(re);
+        if (m && m[1]) { cover = m[1].replace(/\\\\u002F/g, '/'); break; }
+      }
     }
   } catch (e) {}
+  if (!cover) {
+    const og = document.querySelector('meta[property="og:image"], meta[name="og:image"]');
+    if (og && og.content) cover = og.content.trim();
+  }
+  if (!cover) {
+    const liveImg = document.querySelector(
+      'a[href*="live.douyin.com"] img, [class*="live"] img, [data-e2e*="live"] img');
+    if (liveImg && (liveImg.currentSrc || liveImg.src))
+      cover = (liveImg.currentSrc || liveImg.src).trim();
+  }
   let nick = '';
   const nickEl = document.querySelector('h1, [data-e2e="user-info"] h1, [class*="nickname"]');
   if (nickEl) nick = (nickEl.textContent || '').trim().slice(0, 80);
-  return { hrefs, liveText, roomId, webRid, nick, bodyLen: txt.length };
+  return { hrefs, liveText, roomId, webRid, nick, cover, bodyLen: txt.length };
 }"""
 
 
@@ -239,6 +259,25 @@ async def probe_douyin_live(
                 author=(data.get("nick") or "").strip(),
             )
 
+        cover = (data.get("cover") or "").strip()
+        # 主页没封面时进直播间补一枪 og:image / 房间封面
+        if not cover and watch:
+            try:
+                await page.goto(watch, wait_until="domcontentloaded", timeout=25000)
+                await page.wait_for_timeout(1200)
+                cover = await page.evaluate("""() => {
+                  const og = document.querySelector('meta[property="og:image"], meta[name="og:image"]');
+                  if (og && og.content) return og.content.trim();
+                  const html = document.documentElement ? document.documentElement.innerHTML : '';
+                  const m = html.match(/"(?:cover|origin_cover)"\\s*:\\s*\\{\\s*"url_list"\\s*:\\s*\\[\\s*"(https?:[^"]+)"/);
+                  if (m) return m[1].replace(/\\\\u002F/g, '/');
+                  const img = document.querySelector('video[poster]');
+                  if (img && img.getAttribute('poster')) return img.getAttribute('poster');
+                  return '';
+                }""") or ""
+            except Exception as exc:
+                log.debug("douyin live cover fetch: %s", exc)
+
         sid = web_rid or room_id or urlparse(watch).path.strip("/")
         return LiveInfo(
             is_live=True,
@@ -246,6 +285,7 @@ async def probe_douyin_live(
             session_id=f"dy_{sid}",
             title="直播中",
             author=(data.get("nick") or "").strip(),
+            cover=cover.strip(),
             watch_url=watch,
         )
     except Exception as exc:

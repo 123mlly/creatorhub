@@ -2720,17 +2720,6 @@ def _target_dict(t: MonitorTarget) -> dict:
     }
 
 
-def _content_dict(r: ContentRecord) -> dict:
-    return {
-        "id": r.id, "platform": r.platform, "target_id": r.target_id,
-        "aweme_id": r.aweme_id, "desc": r.desc, "media_type": r.media_type,
-        "quality": r.quality, "create_time": r.create_time, "cover_url": r.cover_url,
-        "like_count": r.like_count, "comment_count": r.comment_count,
-        "duration": r.duration, "retry_count": r.retry_count,
-        "download_status": r.download_status, "local_path": r.local_path, "error": r.error,
-    }
-
-
 def _content_local_path(rec: ContentRecord) -> Path | None:
     if not rec.local_path:
         return None
@@ -2748,6 +2737,38 @@ def _content_local_media_path(rec: ContentRecord) -> Path | None:
         return path if path and path.is_file() and path.stat().st_size > 0 else None
     except OSError:
         return None
+
+
+def _content_cover_file(rec: ContentRecord) -> Path | None:
+    """本地封面 jpg(直播抽帧等),旁路于视频文件。"""
+    media = _content_local_media_path(rec)
+    if not media:
+        return None
+    from .platforms.live import live_cover_path_for
+    cand = live_cover_path_for(str(media))
+    try:
+        return cand if cand.is_file() and cand.stat().st_size > 200 else None
+    except OSError:
+        return None
+
+
+def _content_dict(r: ContentRecord) -> dict:
+    cover = r.cover_url or ""
+    # 已录完/已下载且存在本地封面时,用同源接口(避免 file:// 与跨域失效)
+    if _content_cover_file(r) or (
+        r.media_type == "live"
+        and r.download_status == "done"
+        and _content_local_media_path(r)
+    ):
+        cover = f"/api/contents/{r.id}/cover"
+    return {
+        "id": r.id, "platform": r.platform, "target_id": r.target_id,
+        "aweme_id": r.aweme_id, "desc": r.desc, "media_type": r.media_type,
+        "quality": r.quality, "create_time": r.create_time, "cover_url": cover,
+        "like_count": r.like_count, "comment_count": r.comment_count,
+        "duration": r.duration, "retry_count": r.retry_count,
+        "download_status": r.download_status, "local_path": r.local_path, "error": r.error,
+    }
 
 
 def _reveal_in_file_manager(path: Path):
@@ -2784,9 +2805,10 @@ async def content_media(cid: int):
         except Exception:
             medias = []
         local_media = _content_local_media_path(rec)
+        d = _content_dict(rec)
         return {
             "id": rec.id, "platform": rec.platform, "desc": rec.desc,
-            "media_type": rec.media_type, "cover_url": rec.cover_url,
+            "media_type": rec.media_type, "cover_url": d["cover_url"],
             "local_path": rec.local_path, "medias": medias,
             "local_url": f"/api/contents/{rec.id}/local-media" if local_media else "",
         }
@@ -2807,6 +2829,44 @@ async def content_local_media(cid: int):
         filename=path.name,
         content_disposition_type="inline",
         headers={"Cache-Control": "private, no-cache"},
+    )
+
+
+@app.get("/api/contents/{cid}/cover")
+async def content_cover(cid: int):
+    """本地封面图;直播录完后若尚未抽帧则现场抽一帧。"""
+    with get_session() as s:
+        rec = s.get(ContentRecord, cid)
+        if not rec:
+            raise HTTPException(404, "记录不存在")
+        path = _content_cover_file(rec)
+        media = _content_local_media_path(rec)
+        # 远端封面回退(开播时抓到的)
+        remote = (rec.cover_url or "").strip()
+        if remote.startswith("http") and not path and not media:
+            from fastapi.responses import RedirectResponse
+            return RedirectResponse(remote, status_code=302)
+    if not path and media:
+        from .platforms.live import extract_cover_frame_sync
+        ok, cpath, err = await asyncio.to_thread(extract_cover_frame_sync, str(media))
+        if ok and cpath:
+            path = Path(cpath)
+        else:
+            if remote.startswith("http"):
+                from fastapi.responses import RedirectResponse
+                return RedirectResponse(remote, status_code=302)
+            raise HTTPException(404, err or "封面不存在")
+    if not path:
+        if remote.startswith("http"):
+            from fastapi.responses import RedirectResponse
+            return RedirectResponse(remote, status_code=302)
+        raise HTTPException(404, "封面不存在")
+    return FileResponse(
+        path,
+        filename=path.name,
+        content_disposition_type="inline",
+        media_type="image/jpeg",
+        headers={"Cache-Control": "private, max-age=3600"},
     )
 
 

@@ -2711,6 +2711,15 @@ function contentStatusLabel(status, mediaType) {
   return ({ pending: "等待中", downloading: "下载中", done: "已下载", failed: "失败" })[status] || status || "未知";
 }
 
+function contentCoverCell(r) {
+  const canPlay = r.download_status === "done" && !!String(r.local_path || "").trim();
+  if (r.cover_url) {
+    return `<img class="thumb${canPlay ? " playable" : ""}" src="${r.cover_url}" alt="封面" referrerpolicy="no-referrer" onclick="openPreview(${r.id})" title="${canPlay ? "点击播放" : "预览"}">`;
+  }
+  const icon = ic(r.media_type === "images" ? "i-image" : "i-film");
+  if (!canPlay) return `<span class="content-cover-empty">${icon}</span>`;
+  return `<span class="content-cover-empty playable" onclick="openPreview(${r.id})" title="点击播放" role="button" tabindex="0">${icon}</span>`;
+}
 function contentPathMeta(r) {
   const raw = String(r.local_path || "").trim();
   if (!raw) return null;
@@ -2884,7 +2893,7 @@ async function refreshContents() {
     const description = esc(r.desc || "(无描述)");
     return `<tr>
       <td class="content-check-cell"><input type="checkbox" data-id="${r.id}" onchange="contentToggleOne(${r.id}, this.checked)" ${selContent.has(r.id) ? "checked" : ""}></td>
-      <td class="content-cover-cell">${r.cover_url ? `<img class="thumb" src="${r.cover_url}" alt="封面" referrerpolicy="no-referrer" onclick="openPreview(${r.id})">` : `<span class="content-cover-empty">${ic(r.media_type === "images" ? "i-image" : "i-film")}</span>`}</td>
+      <td class="content-cover-cell">${contentCoverCell(r)}</td>
       <td class="content-desc-cell">
         <div class="content-desc-text" title="${description}">${description}</div>
         ${monitor ? `<div class="content-desc-meta">${sourceMeta(monitor)}</div>` : ""}
@@ -3078,7 +3087,8 @@ let PV_N = 0, PV_I = 0, PV_REQ = 0;
 function _pvRender(d) {
   const box = $("pv-media"), cap = $("pv-cap");
   const vid = (d.medias || []).find(m => m.kind === "video");
-  if (d.media_type === "video" && (d.local_url || vid)) {
+  const isVideo = d.media_type === "video" || d.media_type === "live";
+  if (isVideo && (d.local_url || vid)) {
     const videoUrl = d.local_url || vid.url;
     box.innerHTML = `<video src="${esc(videoUrl)}" controls autoplay playsinline preload="metadata" poster="${esc(d.cover_url || "")}" referrerpolicy="no-referrer"></video>`;
     const video = box.querySelector("video");

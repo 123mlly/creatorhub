@@ -661,6 +661,7 @@ class MonitorEngine:
         from ..platforms.live import (
             probe_douyin_live, probe_youtube_live,
             record_douyin_live, record_live_stream,
+            extract_cover_frame_sync,
         )
 
         # 已有录制任务在跑:只刷新扫描时间
@@ -797,12 +798,27 @@ class MonitorEngine:
                         quality=quality,
                         platform=platform,
                     )
+                cover_api = ""
+                if ok and path:
+                    try:
+                        cok, cpath, cerr = await asyncio.to_thread(
+                            extract_cover_frame_sync, path)
+                        if cok and cpath:
+                            cover_api = f"/api/contents/{record_id}/cover"
+                        else:
+                            log.warning("live cover extract failed #%s: %s",
+                                        record_id, cerr)
+                    except Exception as cex:
+                        log.warning("live cover extract error #%s: %s",
+                                    record_id, cex)
                 with get_session() as s:
                     r = s.get(ContentRecord, record_id)
                     if r:
                         r.download_status = "done" if ok else "failed"
                         r.local_path = path or ""
                         r.error = err or ""
+                        if cover_api:
+                            r.cover_url = cover_api
                         s.add(r)
                     t = s.get(MonitorTarget, target_id)
                     if t:
