@@ -2401,7 +2401,7 @@ def _meta_matches(item: MonitorTarget | CommentWatch, group_name: str, tag: str)
 class TargetIn(BaseModel):
     url_or_secuid: str                       # 抖音/小红书主页链接 或 小红书关键词
     platform: str = "douyin"                # douyin | xhs
-    target_kind: str = "creator"            # creator | keyword(仅小红书)
+    target_kind: str = "creator"            # creator | keyword(仅小红书) | live(抖音/YouTube 直播)
     account_id: int | None = None
     interval_seconds: int = 300
     initial_backfill_count: int | None = None
@@ -2428,9 +2428,14 @@ async def add_monitor(body: TargetIn):
     platform = body.platform if body.platform in ("douyin", "xhs", "kuaishou", "youtube") else "douyin"
     sec_uid = keyword = xsec_token = ""
     kind = "creator"
-
-    if platform == "xhs" and body.target_kind == "keyword":
+    if body.target_kind == "live":
+        kind = "live"
+        if platform not in ("douyin", "youtube"):
+            raise HTTPException(400, "直播监控目前仅支持抖音 / YouTube")
+    elif platform == "xhs" and body.target_kind == "keyword":
         kind = "keyword"
+
+    if kind == "keyword":
         keyword = body.url_or_secuid.strip()
         if not keyword:
             raise HTTPException(400, "请输入要监控的搜索关键词")
@@ -2462,7 +2467,7 @@ async def add_monitor(body: TargetIn):
         if platform == "douyin":
             if not body.account_id:
                 raise HTTPException(
-                    400, "抖音作品监控必须选择已登录账号,匿名抓取可能返回陈旧或残缺作品")
+                    400, "抖音监控必须选择已登录账号,匿名抓取可能返回陈旧或残缺作品")
             monitor_acc = s.get(DouyinAccount, body.account_id)
             if (not monitor_acc or monitor_acc.platform != "douyin"
                     or monitor_acc.status != "active"):
@@ -2481,18 +2486,24 @@ async def add_monitor(body: TargetIn):
                 raise HTTPException(400, "所选账号不存在或与监控平台不匹配")
         if kind == "keyword":
             dup = s.exec(select(MonitorTarget).where(MonitorTarget.platform == platform)
-                         .where(MonitorTarget.keyword == keyword)).first()
+                         .where(MonitorTarget.keyword == keyword)
+                         .where(MonitorTarget.target_kind == kind)).first()
         else:
             dup = s.exec(select(MonitorTarget).where(MonitorTarget.platform == platform)
-                         .where(MonitorTarget.sec_uid == sec_uid)).first()
+                         .where(MonitorTarget.sec_uid == sec_uid)
+                         .where(MonitorTarget.target_kind == kind)).first()
         if dup:
             raise HTTPException(409, "该监控目标已存在")
         q = body.video_quality.strip()
         if q and q not in QUALITY_CHOICES:
             raise HTTPException(400, f"画质取值无效: {q}")
-        backfill_count = (cfg.engine.monitor_initial_backfill_count
-                          if body.initial_backfill_count is None
-                          else body.initial_backfill_count)
+        # 直播无历史回填;间隔建议更短(默认随表单,最低允许 60s)
+        interval = max(60, int(body.interval_seconds or 300)) if kind == "live" \
+            else body.interval_seconds
+        backfill_count = 0 if kind == "live" else (
+            cfg.engine.monitor_initial_backfill_count
+            if body.initial_backfill_count is None
+            else body.initial_backfill_count)
         if backfill_count < -1 or backfill_count > 1000:
             raise HTTPException(400, "首次回填数须为 -1(尽可能全量)或 0~1000")
         t = MonitorTarget(platform=platform, target_kind=kind, keyword=keyword,
@@ -2502,7 +2513,7 @@ async def add_monitor(body: TargetIn):
                           group_name=_meta_text(body.group_name, 40),
                           tags=_dump_meta_tags(_meta_tags(body.tags)),
                           account_id=body.account_id,
-                          interval_seconds=body.interval_seconds, download_dir=dl,
+                          interval_seconds=interval, download_dir=dl,
                           initial_backfill_count=backfill_count, video_quality=q)
         s.add(t); s.commit(); s.refresh(t)
         return _target_dict(t)
@@ -2564,8 +2575,19 @@ async def list_monitors(platform: str | None = None):
         out = []
         for t in ts:
             d = _target_dict(t)
-            d["content_count"] = len(s.exec(
-                select(ContentRecord).where(ContentRecord.target_id == t.id)).all())
+            rows = s.exec(
+                select(ContentRecord).where(ContentRecord.target_id == t.id)).all()
+            d["content_count"] = len(rows)
+            # 直播监控:带上最近一场录制状态,方便列表展示「录制中/已录完」
+            if (t.target_kind or "") == "live":
+                live_rows = [r for r in rows if (r.media_type or "") == "live"]
+                live_rows.sort(key=lambda r: r.id or 0, reverse=True)
+                latest = live_rows[0] if live_rows else None
+                d["live_rec_status"] = latest.download_status if latest else ""
+                d["live_rec_id"] = latest.id if latest else None
+            else:
+                d["live_rec_status"] = ""
+                d["live_rec_id"] = None
             out.append(d)
         return out
 

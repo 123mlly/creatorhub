@@ -1360,12 +1360,9 @@
         <h2 id="mon-add-title">添加作品监控 <span class="sub">监控并下载新作品</span></h2>
       </div>
       <div class="stack">
-        <div class="xhs-only">
+        <div id="t-kind-wrap">
           <label class="field" for="t-kind">监控类型</label>
-          <select id="t-kind" aria-label="监控类型" onchange="applyMonitorForm()">
-            <option value="creator">创作者笔记(盯一个博主)</option>
-            <option value="keyword">关键词(盯一个搜索词)</option>
-          </select>
+          <select id="t-kind" aria-label="监控类型" onchange="applyMonitorForm()"></select>
         </div>
         <div>
           <label class="field" for="t-url" id="t-url-label">主页链接 / 短链 / sec_uid</label>
@@ -1392,7 +1389,9 @@
         <div class="row monitor-options">
           <select id="t-acc" aria-label="使用账号"></select>
           <select id="t-interval" aria-label="监控间隔">
-            <option value="300">每 5 分钟</option>
+            <option value="60" class="live-interval-only">每 1 分钟</option>
+            <option value="120" class="live-interval-only">每 2 分钟</option>
+            <option value="300" selected>每 5 分钟</option>
             <option value="600">每 10 分钟</option>
             <option value="1800">每 30 分钟</option>
             <option value="3600">每小时</option>

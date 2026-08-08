@@ -494,8 +494,8 @@ function applyPlatformUI() {
     : PLATFORM === "kuaishou" ? "从 www.kuaishou.com 登录后复制完整 Cookie"
     : PLATFORM === "youtube" ? "从 youtube.com 登录后复制完整 Cookie(含 SID / LOGIN_INFO 等)"
     : "从浏览器开发者工具复制完整 Cookie";
+  syncMonitorKindOptions();
   applyMonitorForm();
-  if ($("t-kind") && PLATFORM !== "xhs") $("t-kind").value = "creator";
   // 视频号只有本账号数据,不支持「监控他人」:若正停在这些面板,自动切到「账号管理」
   if (pfIsChannels(PLATFORM)) {
     const cur = (document.querySelector('.navitem.active') || {}).dataset;
@@ -517,9 +517,63 @@ function applyPlatformUI() {
   }
   csSyncAll();   // 平台切换可能改了下拉选项/值,同步自定义下拉显示
 }
+/** 按平台重建监控类型下拉(小红书/快手不出现直播)。 */
+function syncMonitorKindOptions() {
+  const sel = $("t-kind");
+  const wrap = $("t-kind-wrap");
+  if (!sel) return;
+  const prev = sel.value;
+  const opts = [];
+  if (PLATFORM === "xhs") {
+    opts.push(["creator", "创作者笔记(盯一个博主)"]);
+    opts.push(["keyword", "关键词(盯一个搜索词)"]);
+  } else if (PLATFORM === "douyin" || PLATFORM === "youtube") {
+    opts.push(["creator", "作品监控(盯新视频)"]);
+    opts.push(["live", "直播监控(开播提醒并录制)"]);
+  } else if (PLATFORM === "kuaishou") {
+    opts.push(["creator", "创作者作品(盯新作品)"]);
+  }
+  // 快手只有一项时仍显示类型(清晰);视频号无作品监控面板
+  sel.innerHTML = opts.map(([v, lab]) =>
+    `<option value="${v}">${lab}</option>`).join("");
+  const allowed = new Set(opts.map(o => o[0]));
+  sel.value = allowed.has(prev) ? prev : (opts[0] ? opts[0][0] : "creator");
+  if (wrap) wrap.style.display = opts.length ? "" : "none";
+  try { csSyncAll(); } catch (e) {}
+}
+
 function applyMonitorForm() {
   const title = $("mon-add-title");
   const lbl = $("t-url-label");
+  // 保险:非抖音/YouTube 绝不停留在 live
+  if ($("t-kind") && $("t-kind").value === "live"
+      && !(PLATFORM === "douyin" || PLATFORM === "youtube")) {
+    $("t-kind").value = "creator";
+  }
+  const kind = $("t-kind") ? $("t-kind").value : "creator";
+  const isLive = kind === "live" && (PLATFORM === "douyin" || PLATFORM === "youtube");
+  document.querySelectorAll(".live-interval-only").forEach(e => {
+    e.hidden = !isLive;
+    if ("disabled" in e) e.disabled = !isLive;
+  });
+  // 直播无历史回填
+  if ($("t-backfill")) $("t-backfill").disabled = isLive;
+  if (isLive && $("t-interval")) {
+    const v = +$("t-interval").value;
+    if (v > 300) $("t-interval").value = "60";
+  }
+  if (isLive) {
+    if (PLATFORM === "youtube") {
+      if (title) title.innerHTML = '添加直播监控 <span class="sub">开播提醒并用 yt-dlp 录制为 mp4</span>';
+      if (lbl) lbl.textContent = "频道链接 / @handle / 频道 ID";
+      $("t-url").placeholder = "粘贴要盯直播的频道 youtube.com/@xxx";
+    } else {
+      if (title) title.innerHTML = '添加直播监控 <span class="sub">开播提醒并用 ffmpeg 录制为 mp4</span>';
+      if (lbl) lbl.textContent = "主页链接 / 短链 / sec_uid";
+      $("t-url").placeholder = "粘贴抖音主页链接、v.douyin.com 短链或 sec_uid";
+    }
+    return;
+  }
   if (PLATFORM === "youtube") {
     if (title) title.innerHTML = '添加频道监控 <span class="sub">监控并下载新视频(yt-dlp)</span>';
     if (lbl) lbl.textContent = "频道链接 / @handle / 频道 ID";
@@ -536,7 +590,6 @@ function applyMonitorForm() {
       : "粘贴抖音主页链接、v.douyin.com 短链或 sec_uid";
     return;
   }
-  const kind = $("t-kind") ? $("t-kind").value : "creator";
   if (kind === "keyword") {
     if (title) title.innerHTML = '添加关键词监控 <span class="sub">盯一个搜索词的新笔记</span>';
     if (lbl) lbl.textContent = "搜索关键词";
@@ -796,6 +849,7 @@ async function saveCookie() {
 // ─── 账号 ───
 let ACCOUNTS = [];
 let MONITORS = [], WATCHES = [], CONTENTS = [];
+const LIVE_REC_WATCH = new Set();  // 正在录制的直播 content id,完成后 toast
 let CONTENT_SRC = "", CONTENT_GROUP = "", CONTENT_TAG = "";
 let CONTENT_PAGE = 1, CONTENT_PAGE_SIZE = 10, CONTENT_TOTAL = 0;
 let COMMENT_SRC = "", COMMENT_GROUP = "", COMMENT_TAG = "";
@@ -1036,7 +1090,11 @@ function enhanceAllMetaControls(root) {
 document.addEventListener("mousedown", event => {
   if (OPEN_META_COMBO && !event.target.closest(".meta-combo")) OPEN_META_COMBO.close();
 }, true);
-function monitorBaseName(t) { return t.target_kind === "keyword" ? "#" + t.keyword : (t.nickname || (t.sec_uid || "").slice(0, 12)); }
+function monitorBaseName(t) {
+  if (t.target_kind === "keyword") return "#" + t.keyword;
+  const n = t.nickname || (t.sec_uid || "").slice(0, 12);
+  return t.target_kind === "live" ? n + "·直播" : n;
+}
 function watchBaseName(w) { return w.title || w.aweme_id || (w.sec_uid || "").slice(0, 12); }
 function monitorName(t) { const base = monitorBaseName(t); return t.alias ? `${t.alias} · ${base}` : base; }
 function watchName(w) { const base = watchBaseName(w); return w.alias ? `${w.alias} · ${base}` : base; }
@@ -2446,7 +2504,11 @@ async function delChannel(id) { if (await uiConfirm({ title: "删除渠道", mes
 // ─── 监控 ───
 async function addMonitor() {
   const url_or_secuid = $("t-url").value.trim();
-  const target_kind = (PLATFORM === "xhs" && $("t-kind")) ? $("t-kind").value : "creator";
+  let target_kind = $("t-kind") ? $("t-kind").value : "creator";
+  if (target_kind === "live" && PLATFORM !== "douyin" && PLATFORM !== "youtube") target_kind = "creator";
+  if (PLATFORM === "xhs" && !["creator", "keyword"].includes(target_kind)) target_kind = "creator";
+  if ((PLATFORM === "douyin" || PLATFORM === "youtube") && !["creator", "live"].includes(target_kind)) target_kind = "creator";
+  if (PLATFORM === "kuaishou" || PLATFORM === "shipinhao") target_kind = "creator";
   if (!url_or_secuid) { toast(target_kind === "keyword" ? "请输入搜索关键词" : "请输入主页链接 / 短链 / id", "err"); return; }
   if ((PLATFORM === "xhs" || PLATFORM === "douyin" || PLATFORM === "youtube") && !$("t-acc").value) {
     const platformName = PLATFORM === "xhs" ? "小红书" : PLATFORM === "youtube" ? "YouTube" : "抖音";
@@ -2463,7 +2525,8 @@ async function addMonitor() {
           url_or_secuid, platform: PLATFORM, target_kind,
           account_id: $("t-acc").value ? +$("t-acc").value : null,
           interval_seconds: +$("t-interval").value,
-          initial_backfill_count: (PLATFORM === "douyin" || PLATFORM === "youtube") ? +$("t-backfill").value : 0,
+          initial_backfill_count: (target_kind === "live") ? 0
+            : ((PLATFORM === "douyin" || PLATFORM === "youtube") ? +$("t-backfill").value : 0),
           download_dir: $("t-dir").value.trim(),
           video_quality: PLATFORM === "xhs" ? "" : $("t-quality").value,
           alias: $("t-alias").value.trim(), group_name: getMetaValue("t-group").trim(),
@@ -2473,7 +2536,7 @@ async function addMonitor() {
       ["t-url", "t-dir", "t-alias"].forEach(id => $(id).value = "");
       setMetaValue("t-group", ""); setMetaValue("t-tags", "");
       $("add-msg").textContent = "已添加 ✓";
-      toast("已开始监控", "ok");
+      toast(target_kind === "live" ? "已开始直播监控" : "已开始监控", "ok");
     } catch (e) { $("add-msg").textContent = "失败: " + e.message; toast("添加失败:" + e.message, "err"); }
   });
   refreshMonitors();
@@ -2511,8 +2574,11 @@ async function editMonitorMeta(id) {
   } catch (e) { toast("更新失败:" + e.message, "err"); }
 }
 function monRow(t) {
+  const liveBadge = t.target_kind === "live"
+    ? `<span class="pill warn bare" style="margin-left:6px">直播</span>` : "";
   const label = t.target_kind === "keyword"
-    ? `<span class="ic-text">${ic("i-hash")}${esc(t.keyword)}</span>` : esc(t.nickname || (t.sec_uid || "").slice(0, 12));
+    ? `<span class="ic-text">${ic("i-hash")}${esc(t.keyword)}</span>`
+    : `${esc(t.nickname || (t.sec_uid || "").slice(0, 12))}${liveBadge}`;
   const acc = ACCOUNTS.find(a => a.id === t.account_id);
   // 抖音/小红书都显示绑定账号:抖音未登录抓主页易拿到风控过的旧快照,绑号才稳定
   const accTag = acc
@@ -2521,6 +2587,17 @@ function monRow(t) {
   const bindBtn = acc
     ? `<button class="ghost sm" onclick="bindAccount(${t.id})">换账号</button>`
     : `<button class="sm" style="background:var(--warn);border-color:transparent;color:#1a1a1a" onclick="bindAccount(${t.id})">绑定账号</button>`;
+  let statusPill = `<span class="pill ${t.enabled ? "active" : "invalid"}">${t.enabled ? "监控中" : "已暂停"}</span>`;
+  if (t.target_kind === "live" && t.enabled) {
+    const st = t.live_rec_status || "";
+    if (st === "downloading" || st === "pending") {
+      statusPill = `<span class="pill downloading">录制中</span>`;
+    } else if (st === "done") {
+      statusPill = `<span class="pill done">已录完</span><span class="pill active bare" style="margin-left:4px">监控中</span>`;
+    } else if (st === "failed") {
+      statusPill = `<span class="pill failed">录制失败</span>`;
+    }
+  }
   return `<tr>
     <td class="card-main"><div class="user-cell">${t.avatar ? `<img class="avatar" src="${t.avatar}" alt="" referrerpolicy="no-referrer">` : ""}<div><span>${label}</span>${t.alias ? `<div class="alias-line">${esc(t.alias)}</div>` : ""}${accTag}</div></div></td>
     <td data-label="分组">${metaChips(t)}</td>
@@ -2530,7 +2607,7 @@ function monRow(t) {
       ${t.platform === "xhs" ? "" : `<span class="pill q bare">${QMAP[t.video_quality] || "默认"}</span> `}
       <span class="mut" title="${esc(t.download_dir || "默认目录")}" style="display:inline-block;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:middle">${esc(t.download_dir || "默认")}</span></td>
     <td data-label="扫描" class="mut">${t.last_scan_at ? new Date(t.last_scan_at + "Z").toLocaleString() : "—"}${t.last_error ? ` <span class="warn-ic" title="${esc(t.last_error)}">${ic("i-info")}</span>` : ""}</td>
-    <td data-label="状态"><span class="pill ${t.enabled ? "active" : "invalid"}">${t.enabled ? "监控中" : "已暂停"}</span></td>
+    <td data-label="状态">${statusPill}</td>
     <td class="acttd">
       <button class="ghost sm" onclick="runNow(${t.id})">立即抓取</button>
       <button class="ghost sm" onclick="editDir(${t.id}, ${JSON.stringify(t.download_dir || "").replace(/"/g, "&quot;")})">目录</button>
@@ -2580,7 +2657,21 @@ async function bindAccount(id) {
   catch (e) { toast("绑定失败:" + e.message, "err"); }
 }
 async function refreshMonitors() {
+  const prev = new Map(MONITORS.map(t => [t.id, t.live_rec_status || ""]));
   const ts = await api("/api/monitors?platform=" + PLATFORM);
+  for (const t of ts) {
+    if (t.target_kind !== "live") continue;
+    const before = prev.get(t.id) || "";
+    const now = t.live_rec_status || "";
+    if ((before === "downloading" || before === "pending") && now === "done") {
+      toast(`直播已录完: ${(t.nickname || t.alias || "目标").slice(0, 24)}`, "ok", 5000);
+    } else if ((before === "downloading" || before === "pending") && now === "failed") {
+      toast(`直播录制失败: ${(t.nickname || t.alias || "目标").slice(0, 24)}`, "err", 6000);
+    }
+    if (now === "downloading" || now === "pending") {
+      if (t.live_rec_id) LIVE_REC_WATCH.add(t.live_rec_id);
+    }
+  }
   MONITORS = ts; populateMonitorFacets(); populateContentSrc();
   $("stat-mon").textContent = ts.filter(t => t.enabled).length;
   if ($("tb-mon")) $("tb-mon").textContent = ts.length;
@@ -2612,7 +2703,11 @@ function contentTimeCell(unix) {
   const time = date.toLocaleTimeString("zh-CN", { hour12: false });
   return `<div class="content-time"><span>${esc(day)}</span><span>${esc(time)}</span></div>`;
 }
-function contentStatusLabel(status) {
+function contentStatusLabel(status, mediaType) {
+  if (mediaType === "live") {
+    return ({ pending: "待录制", downloading: "录制中", done: "已录完", failed: "录制失败" })[status]
+      || status || "未知";
+  }
   return ({ pending: "等待中", downloading: "下载中", done: "已下载", failed: "失败" })[status] || status || "未知";
 }
 
@@ -2730,7 +2825,7 @@ function noteCard(r) {
         <span class="like">${ic("i-heart")}${fmtNum(r.like_count)}</span>
       </div>
       <div class="ncard-actions">
-        <span class="pill ${r.download_status}" style="flex:1;justify-content:center" title="${esc(r.error || "")}">${r.download_status}${r.error ? " ⓘ" : ""}</span>
+        <span class="pill ${r.download_status}" style="flex:1;justify-content:center" title="${esc(r.error || "")}">${contentStatusLabel(r.download_status, r.media_type)}${r.error ? " ⓘ" : ""}</span>
         ${r.download_status === "failed" ? `<button class="ghost sm" onclick="retryDl(${r.id})">重试</button>` : ""}
         ${((PLATFORM === "douyin" || PLATFORM === "kuaishou") && r.download_status === "done") ? `<button class="ghost sm" onclick="pickRepostTarget(${r.id})">转发</button>` : ""}
         ${(PLATFORM === "xhs" && r.download_status === "done") ? `<button class="ghost sm" onclick="pickRepostTarget(${r.id})">转发</button>` : ""}
@@ -2757,6 +2852,18 @@ async function refreshContents() {
     CONTENT_PAGE = pages;
     return refreshContents();
   }
+  // 直播录制结束提示(轮询发现 downloading → done/failed)
+  for (const r of rows) {
+    if (r.media_type !== "live") continue;
+    if (r.download_status === "downloading" || r.download_status === "pending") {
+      LIVE_REC_WATCH.add(r.id);
+    } else if (LIVE_REC_WATCH.has(r.id)) {
+      LIVE_REC_WATCH.delete(r.id);
+      const name = (r.desc || "直播").slice(0, 24);
+      if (r.download_status === "done") toast(`直播已录完: ${name}`, "ok", 5000);
+      else if (r.download_status === "failed") toast(`直播录制失败: ${name}`, "err", 6000);
+    }
+  }
   CONTENTS = rows;
   if (!CONTENT_SRC && !CONTENT_GROUP && !CONTENT_TAG) {
     $("stat-dl").textContent = Array.isArray(data) ? rows.filter(r => r.download_status === "done").length : (data.done_total ?? rows.filter(r => r.download_status === "done").length);
@@ -2782,11 +2889,11 @@ async function refreshContents() {
         <div class="content-desc-text" title="${description}">${description}</div>
         ${monitor ? `<div class="content-desc-meta">${sourceMeta(monitor)}</div>` : ""}
       </td>
-      <td><span class="content-kind">${r.media_type === "images" ? "图集" : "视频"}</span>${r.quality ? `<span class="content-quality">${esc(r.quality)}</span>` : ""}</td>
+      <td><span class="content-kind">${r.media_type === "images" ? "图集" : r.media_type === "live" ? "直播" : "视频"}</span>${r.quality ? `<span class="content-quality">${esc(r.quality)}</span>` : ""}</td>
       <td class="mut num">${contentTimeCell(r.create_time)}</td>
       <td class="content-metrics num"><span class="metric like">${ic("i-heart")}${fmtNum(r.like_count)}</span>${r.duration ? `<span class="metric">${ic("i-clock")}${fmtDur(r.duration)}</span>` : ""}</td>
       <td class="content-action-cell">
-        <div class="content-status-row"><span class="pill ${r.download_status}">${contentStatusLabel(r.download_status)}</span>${r.error ? `<span class="warn-ic" data-tip="${esc(r.error)}">${ic("i-info")}</span>` : ""}</div>
+        <div class="content-status-row"><span class="pill ${r.download_status}">${contentStatusLabel(r.download_status, r.media_type)}</span>${r.error ? `<span class="warn-ic" data-tip="${esc(r.error)}">${ic("i-info")}</span>` : ""}</div>
         <div class="content-action-buttons">
           ${r.download_status === "failed" ? `<button class="ghost sm" onclick="retryDl(${r.id})">重试</button>` : ""}
           ${((PLATFORM === "douyin" || PLATFORM === "kuaishou" || PLATFORM === "xhs") && r.download_status === "done") ? `<button class="ghost sm content-action-primary" onclick="pickRepostTarget(${r.id})">${ic("i-send")}转发</button>` : ""}

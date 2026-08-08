@@ -42,7 +42,7 @@ class MonitorTarget(SQLModel, table=True):
     """被监控的对象。抖音=用户;小红书=创作者(creator)或搜索关键词(keyword)。"""
     id: Optional[int] = Field(default=None, primary_key=True)
     platform: str = Field(default="douyin", index=True)  # douyin | xhs
-    target_kind: str = "creator"   # creator(账号/创作者) | keyword(小红书搜索词)
+    target_kind: str = "creator"   # creator | keyword(小红书) | live(直播开播监控+录制)
     keyword: str = ""              # target_kind=keyword 时的搜索词
     sec_uid: str = Field(default="", index=True)  # 抖音 sec_uid / 小红书 user_id
     xsec_token: str = ""          # 小红书:打开主页所需令牌(可选,缺失时靠登录态)

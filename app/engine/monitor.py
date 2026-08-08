@@ -7,6 +7,7 @@ import asyncio
 import json
 import logging
 import random
+import re
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
@@ -136,6 +137,7 @@ class MonitorEngine:
         self._geo_checked: dict = {}          # account_id -> 已校验过地区的代理(避免重复探测)
         self._task: Optional[asyncio.Task] = None
         self._running = False
+        self._live_jobs: dict[int, asyncio.Task] = {}  # target_id → 录制任务
 
     def start(self):
         if self._task is None:
@@ -489,6 +491,9 @@ class MonitorEngine:
             if not t0:
                 return {"ok": False, "error": "target not found"}
             platform = t0.platform
+            kind = t0.target_kind or "creator"
+        if kind == "live":
+            return await self._scan_live_target_locked(target_id)
         if platform == "xhs":
             return await self._scan_xhs_target_locked(target_id)
         if platform == "kuaishou":
@@ -650,6 +655,216 @@ class MonitorEngine:
         await asyncio.gather(*(self._download(rec.id, aw, base_dir, proxy)
                                for rec, aw in new_records))
         return {"ok": not error, "new": len(new_records), "error": error}
+
+    async def _scan_live_target_locked(self, target_id: int) -> dict:
+        """直播监控:探测是否开播 → 通知 → 后台录制直到下播。"""
+        from ..platforms.live import (
+            probe_douyin_live, probe_youtube_live,
+            record_douyin_live, record_live_stream,
+        )
+
+        # 已有录制任务在跑:只刷新扫描时间
+        job = self._live_jobs.get(target_id)
+        if job and not job.done():
+            with get_session() as s:
+                t = s.get(MonitorTarget, target_id)
+                if t:
+                    t.last_scan_at = datetime.utcnow()
+                    t.last_error = "录制中…"
+                    s.add(t); s.commit()
+            return {"ok": True, "recording": True, "new": 0}
+
+        with get_session() as s:
+            target = s.get(MonitorTarget, target_id)
+            if not target:
+                return {"ok": False, "error": "target not found"}
+            platform = target.platform
+            if platform not in ("douyin", "youtube"):
+                return self._mark_target_skip(
+                    target_id, "直播监控目前仅支持抖音 / YouTube")
+            if not target.account_id:
+                return self._mark_target_skip(
+                    target_id, "直播监控必须绑定已登录账号")
+            acc = s.get(DouyinAccount, target.account_id)
+            if not acc or acc.platform != platform:
+                return self._mark_target_skip(
+                    target_id, "绑定账号不存在或平台不匹配")
+            if platform == "douyin" and acc.status != "active":
+                return self._mark_target_skip(
+                    target_id, "绑定的抖音账号登录态已失效")
+            if platform == "youtube" and not (acc.storage_state or acc.cookie):
+                return self._mark_target_skip(
+                    target_id, "YouTube 账号缺少 Cookie 登录态")
+            if self._proxy_bad(acc):
+                return self._mark_target_skip(
+                    target_id, "账号代理不可用,已跳过")
+            identity, proxy = self._identity_proxy(acc)
+            state = acc.storage_state or ""
+            sec_uid = target.sec_uid
+            base_dir = target.download_dir or get_setting(
+                "download_dir", self.cfg.engine.media_dir)
+            quality = target.video_quality or get_setting("video_quality", "highest")
+            nick = target.nickname or ""
+
+        if platform == "youtube":
+            info = await probe_youtube_live(
+                sec_uid, proxy=proxy, state_json=state,
+                user_agent=self.cfg.engine.user_agent)
+        else:
+            info = await probe_douyin_live(
+                self.browser, identity, sec_uid,
+                block_media=self.cfg.engine.block_media_resources)
+
+        with get_session() as s:
+            t = s.get(MonitorTarget, target_id)
+            if not t:
+                return {"ok": False, "error": "target not found"}
+            t.last_scan_at = datetime.utcnow()
+            if info.author and not t.nickname:
+                t.nickname = info.author
+                nick = info.author
+            if not info.is_live:
+                t.last_error = info.error or ""
+                s.add(t); s.commit()
+                return {"ok": not info.error, "live": False, "new": 0,
+                        "error": info.error}
+            # 同一场是否已有记录
+            existed = s.exec(
+                select(ContentRecord)
+                .where(ContentRecord.target_id == target_id)
+                .where(ContentRecord.aweme_id == info.session_id)
+            ).first()
+            if existed:
+                if existed.download_status in ("downloading", "pending"):
+                    t.last_error = "录制中…"
+                    s.add(t); s.commit()
+                    return {"ok": True, "recording": True, "new": 0}
+                if existed.download_status == "done":
+                    t.last_error = ""
+                    s.add(t); s.commit()
+                    return {"ok": True, "live": True, "new": 0, "note": "本场已录完"}
+            media_json = json.dumps([{
+                "url": info.watch_url, "kind": "live", "ext": "mp4", "index": 0,
+            }], ensure_ascii=False)
+            rec = ContentRecord(
+                platform=platform,
+                target_id=target_id,
+                aweme_id=info.session_id,
+                desc=info.title or "直播",
+                media_type="live",
+                quality=quality or "",
+                create_time=int(datetime.utcnow().timestamp()),
+                cover_url=info.cover or "",
+                media_json=media_json,
+                download_status="pending",
+            )
+            s.add(rec)
+            t.last_error = "开播,准备录制…"
+            if info.author and not t.nickname:
+                t.nickname = info.author
+            s.add(t); s.commit(); s.refresh(rec)
+            record_id = rec.id
+            target_name = t.nickname or nick or info.author or sec_uid[:12]
+
+        await self._notify_live(target_name, info.title, info.watch_url, platform)
+
+        async def _job():
+            try:
+                with get_session() as s:
+                    r = s.get(ContentRecord, record_id)
+                    if r:
+                        r.download_status = "downloading"
+                        s.add(r); s.commit()
+                author = target_name or "live"
+                out_dir = str(self.downloader._target_dir(author, base_dir))
+                stem = f"{info.session_id}_{(info.title or 'live')[:40]}"
+                stem = re.sub(r'[\\/:*?"<>|\r\n]+', "_", stem).strip(" ._") or info.session_id
+                if platform == "douyin":
+                    ok, path, err = await record_douyin_live(
+                        self.browser, identity, info.watch_url, out_dir,
+                        filename_stem=stem,
+                        proxy=self._dl_proxy(proxy),
+                        user_agent=self.cfg.engine.user_agent,
+                        quality=quality,
+                    )
+                else:
+                    ok, path, err = await record_live_stream(
+                        info.watch_url, out_dir,
+                        filename_stem=stem,
+                        proxy=self._dl_proxy(proxy),
+                        state_json=state,
+                        user_agent=self.cfg.engine.user_agent,
+                        quality=quality,
+                        platform=platform,
+                    )
+                with get_session() as s:
+                    r = s.get(ContentRecord, record_id)
+                    if r:
+                        r.download_status = "done" if ok else "failed"
+                        r.local_path = path or ""
+                        r.error = err or ""
+                        s.add(r)
+                    t = s.get(MonitorTarget, target_id)
+                    if t:
+                        t.last_error = "" if ok else (err or "录制失败")[:300]
+                        s.add(t)
+                    s.commit()
+                log.info("live record #%s target=%s ok=%s path=%s",
+                         record_id, target_id, ok, path)
+                await self._notify_live_done(
+                    target_name, info.title, path if ok else "", platform, ok,
+                    err if not ok else "")
+            except Exception as e:
+                log.exception("live record job failed: %s", e)
+                with get_session() as s:
+                    r = s.get(ContentRecord, record_id)
+                    if r:
+                        r.download_status = "failed"
+                        r.error = str(e)[:300]
+                        s.add(r); s.commit()
+                await self._notify_live_done(
+                    target_name, info.title, "", platform, False, str(e)[:200])
+            finally:
+                self._live_jobs.pop(target_id, None)
+
+        self._live_jobs[target_id] = asyncio.create_task(_job())
+        return {"ok": True, "live": True, "new": 1, "recording": True}
+
+    async def _notify_live(self, target_name: str, title: str, url: str,
+                           platform: str):
+        with get_session() as s:
+            chans = s.exec(select(NotificationChannel)
+                           .where(NotificationChannel.enabled == True)).all()  # noqa: E712
+            channels = [{"type": c.type, "config": _loads(c.config)} for c in chans]
+        if not channels:
+            return
+        pf = {"douyin": "抖音", "youtube": "YouTube"}.get(platform, platform)
+        head = f"{pf}直播 · {target_name} 开播了"
+        body = (title or "直播中") + (f"\n{url}" if url else "")
+        try:
+            await notify_all(channels, head, body)
+        except Exception as e:
+            log.warning("直播通知失败: %s", e)
+
+    async def _notify_live_done(self, target_name: str, title: str, path: str,
+                                platform: str, ok: bool, error: str = ""):
+        with get_session() as s:
+            chans = s.exec(select(NotificationChannel)
+                           .where(NotificationChannel.enabled == True)).all()  # noqa: E712
+            channels = [{"type": c.type, "config": _loads(c.config)} for c in chans]
+        if not channels:
+            return
+        pf = {"douyin": "抖音", "youtube": "YouTube"}.get(platform, platform)
+        if ok:
+            head = f"{pf}直播 · {target_name} 已录完"
+            body = (title or "直播") + (f"\n文件: {path}" if path else "")
+        else:
+            head = f"{pf}直播 · {target_name} 录制失败"
+            body = (title or "直播") + (f"\n{error}" if error else "")
+        try:
+            await notify_all(channels, head, body)
+        except Exception as e:
+            log.warning("直播结束通知失败: %s", e)
 
     async def _scan_youtube_target_locked(self, target_id: int) -> dict:
         """YouTube 频道监控:yt-dlp flat playlist 拉最近作品并入库下载。"""
