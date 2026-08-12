@@ -8,7 +8,13 @@ from ...browser.identity import Identity
 from ...browser.manager import BrowserManager
 
 STUDIO_URL = "https://studio.youtube.com/"
+HOME_URL = "https://www.youtube.com/"
 _CHANNEL_RE = re.compile(r"/channel/(UC[A-Za-z0-9_-]{22})")
+
+
+def _is_login_url(url: str) -> bool:
+    u = url or ""
+    return "accounts.google.com" in u or "ServiceLogin" in u
 
 
 async def fetch_youtube_self_profile(mgr: BrowserManager, identity: Identity,
@@ -16,14 +22,38 @@ async def fetch_youtube_self_profile(mgr: BrowserManager, identity: Identity,
                                      ) -> Tuple[dict, str]:
     """返回 (profile_dict, error)。error==logged_out 表示未登录。
     profile 字段对齐其它平台:nickname / sec_uid(UC…) / douyin_id(@handle) / avatar / follower_count / aweme_count。
+
+    保活策略:先轻量访问 youtube.com 刷新 Cookie,再进 Studio;若偶发跳登录页会重试一次,
+    降低误判失效。
     """
     page = await mgr.new_page(identity, block_media=True)
     try:
+        # 1) 主站轻摸:续 Cookie / 降低直接撞 Studio 登录墙的概率
+        try:
+            await page.goto(HOME_URL, wait_until="domcontentloaded", timeout=timeout_ms)
+            await page.wait_for_timeout(2000)
+        except Exception:
+            pass
+
+        # 2) Studio 判活 + 读频道
         await page.goto(STUDIO_URL, wait_until="domcontentloaded", timeout=timeout_ms)
-        await page.wait_for_timeout(3500)
+        await page.wait_for_timeout(3000)
         url = page.url or ""
-        if "accounts.google.com" in url or "ServiceLogin" in url:
-            return {}, "logged_out"
+
+        if _is_login_url(url):
+            # 偶发重定向 / 会话传播延迟:再摸一次主站后重进 Studio
+            await page.wait_for_timeout(2500)
+            try:
+                await page.goto(HOME_URL, wait_until="domcontentloaded", timeout=timeout_ms)
+                await page.wait_for_timeout(1500)
+            except Exception:
+                pass
+            await page.goto(STUDIO_URL, wait_until="domcontentloaded", timeout=timeout_ms)
+            await page.wait_for_timeout(3000)
+            url = page.url or ""
+            if _is_login_url(url):
+                return {}, "logged_out"
+
         if "channel_create" in url or "create_channel" in url:
             return {}, "logged_out"
 

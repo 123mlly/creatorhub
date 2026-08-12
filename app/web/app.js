@@ -3469,6 +3469,23 @@ async function openRepost(id, target) {
 let RP_MEDIA = [];         // 可编辑图集:[{url, idx}](idx=原始序号,提交时回传)
 let RP_MEDIA_LEN = 0;      // 原始图片总数(判断是否被编辑过)
 let RP_IS_VIDEO = false;
+function rpVideoThumbFallback(img, id) {
+  const wrap = img && (img.closest(".rp-th") || img.parentNode);
+  if (!wrap) return;
+  wrap.outerHTML = `<div class="rp-th-ph" onclick="openPreview(${id})" title="点击预览视频">${ic("i-play")}</div>`;
+}
+function rpVideoThumbHtml(id, coverUrl, localUrl) {
+  const ph = `<div class="rp-th-ph" onclick="openPreview(${id})" title="点击预览视频">${ic("i-play")}</div>`;
+  // 优先远端/本地封面;有本地文件时还可走抽帧接口
+  const thumb = (coverUrl || "").trim()
+    || (localUrl ? `/api/contents/${id}/cover` : "");
+  if (!thumb) return ph;
+  return `<div class="rp-th rp-th-video" onclick="openPreview(${id})" title="点击预览视频">
+    <img src="${esc(thumb)}" alt="封面" referrerpolicy="no-referrer" loading="lazy"
+         onerror="rpVideoThumbFallback(this,${id})">
+    <span class="rp-th-badge cover">视频</span>
+  </div>`;
+}
 async function renderRepostThumbs(id) {
   const box = $("rp-thumbs"); if (!box) return;
   RP_MEDIA = []; RP_MEDIA_LEN = 0; RP_IS_VIDEO = false;
@@ -3477,9 +3494,10 @@ async function renderRepostThumbs(id) {
     const d = await api("/api/contents/" + id + "/media");
     if (REPOST_ID !== id) return;   // 弹窗已切换/关闭
     const vid = (d.medias || []).find(m => m.kind === "video");
-    if (d.media_type === "video" && (d.local_url || vid)) {
+    const isVideo = d.media_type === "video" || d.media_type === "live";
+    if (isVideo && (d.local_url || vid)) {
       RP_IS_VIDEO = true;
-      box.innerHTML = `<div class="rp-th-ph" onclick="openPreview(${id})" title="点击预览视频">${ic("i-play")}</div>`;
+      box.innerHTML = rpVideoThumbHtml(id, d.cover_url, d.local_url);
       box.style.display = "flex";
       return;
     }

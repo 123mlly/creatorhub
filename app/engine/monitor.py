@@ -135,6 +135,7 @@ class MonitorEngine:
         self._actioning: set[int] = set()           # 正在执行的写操作任务 id
         self._last_acct_check = time.time()   # 上次账号体检时间
         self._geo_checked: dict = {}          # account_id -> 已校验过地区的代理(避免重复探测)
+        self._logout_strikes: dict[int, int] = {}  # account_id → 连续 logged_out 次数(YouTube 抗误杀)
         self._task: Optional[asyncio.Task] = None
         self._running = False
         self._live_jobs: dict[int, asyncio.Task] = {}  # target_id → 录制任务
@@ -204,15 +205,23 @@ class MonitorEngine:
                 a.last_active_at = datetime.utcnow()
                 s.add(a); s.commit()
 
-    def _keepalive_due(self, last_active_at) -> bool:
-        """闲置判定:从未活跃、或距上次活跃超过 idle_keepalive_hours(带 ±jitter 错峰)才需保活。
-        idle_keepalive_hours<=0 时退回旧行为(每轮都摸)。"""
-        hours = self.cfg.engine.idle_keepalive_hours
+    def _keepalive_due(self, last_active_at, hours: float | None = None) -> bool:
+        """闲置判定:从未活跃、或距上次活跃超过阈值(带 ±jitter 错峰)才需保活。
+        hours<=0 时退回旧行为(每轮都摸)。"""
+        if hours is None:
+            hours = self.cfg.engine.idle_keepalive_hours
         if hours <= 0 or last_active_at is None:
             return True
         jitter = max(0.0, self.cfg.engine.scan_jitter)
         factor = 1.0 + random.uniform(-jitter, jitter) if jitter else 1.0
         return (datetime.utcnow() - last_active_at).total_seconds() >= hours * 3600 * factor
+
+    def _keepalive_hours_for(self, platform: str) -> float:
+        if platform == "youtube":
+            yt = float(getattr(self.cfg.engine, "youtube_idle_keepalive_hours", 2.0) or 0)
+            if yt > 0:
+                return yt
+        return float(self.cfg.engine.idle_keepalive_hours or 0)
 
     async def _verify_proxy_region(self, account_id, proxy: str, timezone_id: str) -> None:
         """探测代理出口国家,与账号时区期望不一致时告警(best-effort,只记日志)。
@@ -264,12 +273,14 @@ class MonitorEngine:
                     continue
                 if a.status == "invalid":
                     continue                       # 已失效:摸也救不活,等用户重登,别白发请求
-                if not self._keepalive_due(a.last_active_at):
+                hours = self._keepalive_hours_for(a.platform or "")
+                if not self._keepalive_due(a.last_active_at, hours=hours):
                     continue                       # 近期已被监控/发布/上轮保活摸过,跳过
                 accs.append((a.id, a.platform, a.storage_state, a.creator_storage_state,
                              a.proxy or "", self.browser.identity_for(a)))
         for aid, platform, state, creator_state, proxy, identity in accs:
             await self._verify_proxy_region(aid, proxy, identity.timezone_id)
+            refreshed_state = ""
             try:
                 async with self._account_guard(aid):
                     if platform == "xhs" and creator_state:
@@ -295,14 +306,24 @@ class MonitorEngine:
                     elif platform == "youtube":
                         from ..platforms.youtube import fetch_youtube_self_profile
                         u, err = await fetch_youtube_self_profile(self.browser, identity)
+                        # 保活成功后把刷新过的 Cookie 写回 DB,避免只剩磁盘 profile
+                        if u:
+                            try:
+                                ctx = await self.browser.context_for(identity)
+                                refreshed_state = json.dumps(await ctx.storage_state())
+                            except Exception:
+                                refreshed_state = ""
                     else:
                         u, err = await fetch_self_profile(self.browser, identity)
             except Exception:
                 continue
+            became_invalid = False
+            nick = ""
             with get_session() as s:
                 a = s.get(DouyinAccount, aid)
                 if not a:
                     continue
+                nick = a.nickname or ""
                 if u:
                     if platform == "xhs":
                         p = parse_xhs_self_user(u)
@@ -324,14 +345,34 @@ class MonitorEngine:
                     a.avatar = p.get("avatar") or a.avatar
                     a.follower_count = p.get("follower_count") or a.follower_count
                     a.aweme_count = p.get("aweme_count") or a.aweme_count
+                    if refreshed_state:
+                        a.storage_state = refreshed_state
+                        a.creator_storage_state = refreshed_state
+                    self._logout_strikes.pop(aid, None)
                     got_profile = True
                 elif err == "logged_out":
-                    a.status = "invalid"
-                    log.warning("账号 %s(%s)登录态失效", aid, a.nickname)
-                    got_profile = False
+                    need = 1
+                    if platform == "youtube":
+                        need = max(1, int(getattr(
+                            self.cfg.engine, "youtube_logout_strikes", 2) or 2))
+                    n = self._logout_strikes.get(aid, 0) + 1
+                    self._logout_strikes[aid] = n
+                    if n < need:
+                        log.warning(
+                            "账号 %s(%s)疑似掉线 %s/%s,暂不标失效",
+                            aid, a.nickname, n, need)
+                        got_profile = False
+                    else:
+                        a.status = "invalid"
+                        self._logout_strikes.pop(aid, None)
+                        log.warning("账号 %s(%s)登录态失效", aid, a.nickname)
+                        became_invalid = True
+                        got_profile = False
                 else:
                     got_profile = False
                 s.add(a); s.commit()
+            if became_invalid:
+                await self._notify_account_invalid(aid, nick, platform)
             # 体检成功即记一条粉丝/作品数快照(B4 趋势;不依赖作品健康开关也能出粉丝曲线)
             if got_profile and self.cfg.engine.work_health_stat_snapshots:
                 try:
@@ -845,6 +886,27 @@ class MonitorEngine:
 
         self._live_jobs[target_id] = asyncio.create_task(_job())
         return {"ok": True, "live": True, "new": 1, "recording": True}
+
+    async def _notify_account_invalid(self, account_id: int, nickname: str,
+                                      platform: str):
+        """登录态确认失效时推送,提醒用户重登(尤其 YouTube)。"""
+        with get_session() as s:
+            chans = s.exec(select(NotificationChannel)
+                           .where(NotificationChannel.enabled == True)).all()  # noqa: E712
+            channels = [{"type": c.type, "config": _loads(c.config)} for c in chans]
+        if not channels:
+            return
+        pf = {"douyin": "抖音", "xhs": "小红书", "kuaishou": "快手",
+              "shipinhao": "视频号", "youtube": "YouTube"}.get(platform, platform)
+        name = (nickname or f"#{account_id}").strip()
+        try:
+            await notify_all(
+                channels,
+                f"{pf}账号登录失效",
+                f"「{name}」登录态已失效,请打开 CreatorHub → 账号 → 重新登录。",
+            )
+        except Exception as e:
+            log.warning("账号失效通知失败: %s", e)
 
     async def _notify_live(self, target_name: str, title: str, url: str,
                            platform: str):

@@ -2754,11 +2754,13 @@ def _content_cover_file(rec: ContentRecord) -> Path | None:
 
 def _content_dict(r: ContentRecord) -> dict:
     cover = r.cover_url or ""
-    # 已录完/已下载且存在本地封面时,用同源接口(避免 file:// 与跨域失效)
-    if _content_cover_file(r) or (
-        r.media_type == "live"
-        and r.download_status == "done"
+    # 本地抽帧封面优先;直播无远端封面时走抽帧接口;普通视频缺封面也补
+    if _content_cover_file(r):
+        cover = f"/api/contents/{r.id}/cover"
+    elif (
+        r.download_status == "done"
         and _content_local_media_path(r)
+        and (r.media_type == "live" or (r.media_type == "video" and not cover))
     ):
         cover = f"/api/contents/{r.id}/cover"
     return {

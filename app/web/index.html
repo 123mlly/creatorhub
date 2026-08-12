@@ -302,7 +302,9 @@
   .rp-th:active { cursor:grabbing; }
   .rp-th.dragover { outline:2px dashed var(--brand, #ff2e51); outline-offset:2px; border-radius:10px; }
   .rp-th img, .rp-thumbs .rp-th-ph { width:72px; height:72px; border-radius:10px; object-fit:cover; cursor:zoom-in; border:1px solid var(--line, #e5e5e5); background:var(--card, #f4f4f4); display:block; }
-  .rp-thumbs .rp-th-ph { flex:0 0 auto; display:flex; align-items:center; justify-content:center; }
+  .rp-thumbs .rp-th-ph { flex:0 0 auto; display:flex; align-items:center; justify-content:center; color:var(--mut); }
+  .rp-th.rp-th-video { cursor:zoom-in; }
+  .rp-th.rp-th-video img { background:#111; }
   .rp-th-badge { position:absolute; top:3px; left:3px; font-size:10px; line-height:1; padding:2px 5px; border-radius:6px; background:rgba(0,0,0,.55); color:#fff; pointer-events:none; }
   .rp-th-badge.cover { background:var(--brand, #ff2e51); }
   .rp-th-x { position:absolute; top:2px; right:2px; width:18px; height:18px; border:none; border-radius:50%; background:rgba(0,0,0,.6); color:#fff; font-size:11px; line-height:1; cursor:pointer; padding:0; display:flex; align-items:center; justify-content:center; }

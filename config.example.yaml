@@ -13,6 +13,9 @@ engine:
   comment_recent_days: 7          # 且仅限最近多少天内发布的作品
   comment_max_scrolls: 6          # 评论区翻页深度(滚动容器次数,越大扫得越深)
   account_check_interval_seconds: 1800   # 账号登录态定时体检间隔(秒,0=关闭)
+  idle_keepalive_hours: 6                # 闲置超此时长才保活摸一次(小时,0=每轮都摸)
+  youtube_idle_keepalive_hours: 2        # YouTube 更勤保活(小时);Google 会话更短
+  youtube_logout_strikes: 2              # YouTube 连续几次判掉线才标失效(抗误杀)
   # 自有账号评论模式(创作中心)页面 URL —— 实验性,抖音改版/字段变了改这里
   creator_comment_url: https://creator.douyin.com/creator-micro/interaction/comment-management
   request_timeout_seconds: 20
