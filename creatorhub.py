@@ -276,7 +276,13 @@ def start(
         str(selected_port),
     ]
     if reload:
-        command.append("--reload")
+        # 只盯代码,别盯 data/profiles(Chromium 缓存会持续写盘,拖垮 8GB 机器)
+        command.extend([
+            "--reload",
+            "--reload-dir", "app",
+            "--reload-exclude", "data",
+            "--reload-exclude", "*.db",
+        ])
 
     log(f"启动中，按 Ctrl+C 停止；访问地址：{url}")
     run(command)

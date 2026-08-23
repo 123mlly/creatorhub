@@ -12,7 +12,7 @@ dependencies = [
     "sqlmodel==0.0.22",
     "playwright==1.49.1",
     "xhshow>=0.2.0",
-    "curl_cffi>=0.7",
+    "curl_cffi>=0.13,<0.16",
     "python-multipart>=0.0.9",
     "PyExecJS>=1.5.1",
     "opencv-python-headless>=4.8",

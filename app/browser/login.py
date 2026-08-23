@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from typing import Optional, Tuple
 
 from .identity import Identity
@@ -680,6 +681,109 @@ async def _read_youtube_channel_label(page) -> str:
                     return t[:60]
             except Exception:
                 pass
+        except Exception:
+            continue
+    return ""
+
+
+async def interactive_tiktok_login(mgr: BrowserManager, identity: Identity,
+                                   timeout_seconds: int = 360,
+                                   start_url: str = "https://www.tiktok.com/"
+                                   ) -> Tuple[bool, str, str]:
+    """TikTok 浏览器登录。打开窗口让用户完成登录后落地 Cookie。
+
+    访客进站就会带 tt_chain_token / sid_tt,不能当成功,否则窗口会秒关。
+    必须等到非空 sessionid / sessionid_ss,并离开登录页再关窗。
+
+    返回 (是否成功, storage_state_json, nickname)。
+    """
+    from ..platforms.tiktok.profile import read_tiktok_web_user, tiktok_session_ready
+
+    ctx = await mgr.open_headed(identity)
+    page = await ctx.new_page()
+    await _focus(page)
+    logged = False
+    nickname = ""
+    state_json = ""
+    try:
+        await page.goto(start_url, wait_until="domcontentloaded", timeout=45000)
+        await _focus(page)
+        # 不自动点「登录」:连点+新 profile 很容易触发「频繁操作」
+        await page.wait_for_timeout(2000)
+        waited = 0
+        stable = 0
+        while waited < timeout_seconds:
+            pages = []
+            try:
+                pages = [p for p in ctx.pages if not p.is_closed()]
+            except Exception:
+                break
+            if not pages:
+                break
+            live = page if (page and not page.is_closed()) else pages[-1]
+            try:
+                cookies = await ctx.cookies()
+            except Exception:
+                break
+            user = await read_tiktok_web_user(live)
+            has_session = tiktok_session_ready(cookies)
+            # 页面已露出登录用户,或护照/session Cookie 已写入,都算成功
+            if user.get("loggedIn") or has_session:
+                url = (live.url or "").lower()
+                on_login = any(k in url for k in ("/login", "/signup"))
+                if user.get("loggedIn") or not on_login:
+                    stable += 1
+                    if stable >= 2:
+                        logged = True
+                        if user.get("uniqueId"):
+                            nickname = "@" + str(user["uniqueId"]).lstrip("@")
+                        elif user.get("nickname"):
+                            nickname = str(user["nickname"])[:60]
+                        break
+                else:
+                    stable = 0
+            else:
+                stable = 0
+            if waited and waited % 15 == 0:
+                names = sorted({c.get("name") or "" for c in cookies
+                                if "tiktok.com" in (c.get("domain") or "")})
+                print(f"[tt-login] wait={waited}s url={(live.url or '')[:80]} "
+                      f"user={user.get('uniqueId') or user.get('loggedIn')} "
+                      f"cookies={names[:20]}", flush=True)
+            await asyncio.sleep(1)
+            waited += 1
+        if logged:
+            await page.wait_for_timeout(2000) if page and not page.is_closed() else None
+            if not nickname:
+                target = page if (page and not page.is_closed()) else pages[-1]
+                nickname = await _read_tiktok_nickname(target)
+            state_json = json.dumps(await ctx.storage_state())
+    finally:
+        try:
+            await ctx.close()
+        except Exception:
+            pass
+    return logged, state_json, nickname
+
+
+async def _read_tiktok_nickname(page) -> str:
+    try:
+        hrefs = await page.eval_on_selector_all(
+            'a[href*="/@"]',
+            "els => els.map(e => e.getAttribute('href') || e.href)")
+        for h in hrefs or []:
+            if "/video/" in (h or "") or "/live" in (h or ""):
+                continue
+            m = re.search(r"/(@[\w.-]{2,24})", h or "")
+            if m:
+                return m.group(1)
+    except Exception:
+        pass
+    for sel in ('[data-e2e="user-title"]', 'h1[data-e2e="user-title"]'):
+        try:
+            t = (await page.inner_text(sel, timeout=800) or "").strip()
+            if t:
+                return t[:60]
         except Exception:
             continue
     return ""

@@ -5,7 +5,7 @@ from .login import (interactive_login, interactive_creator_login,
                     interactive_xhs_login, interactive_xhs_creator_login,
                     interactive_ks_login, interactive_ks_creator_login,
                     interactive_channels_login, interactive_channels_creator_login,
-                    interactive_youtube_login)
+                    interactive_youtube_login, interactive_tiktok_login)
 from .fetcher import (fetch_videos, fetch_comments, fetch_creator_comments,
                       fetch_self_profile, post_comment_browser)
 from .xhs_fetcher import (fetch_xhs_notes, fetch_xhs_search, fetch_xhs_note_detail,
@@ -25,7 +25,7 @@ __all__ = ["BrowserManager", "cookie_string_to_state",
            "interactive_xhs_login", "interactive_xhs_creator_login",
            "interactive_ks_login", "interactive_ks_creator_login",
            "interactive_channels_login", "interactive_channels_creator_login",
-           "interactive_youtube_login",
+           "interactive_youtube_login", "interactive_tiktok_login",
            "fetch_videos", "fetch_comments", "fetch_creator_comments",
            "fetch_self_profile", "post_comment_browser",
            "fetch_xhs_notes", "fetch_xhs_search", "fetch_xhs_note_detail",

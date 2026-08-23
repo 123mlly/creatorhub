@@ -217,6 +217,40 @@ def _norm_youtube_work(it: dict) -> Optional[dict]:
     }
 
 
+def _norm_tiktok_work(it: dict) -> Optional[dict]:
+    """yt-dlp TikTok 条目 → AccountWork 字段。"""
+    if not isinstance(it, dict):
+        return None
+    vid = (it.get("id") or "").strip()
+    if not vid and it.get("url"):
+        from ..platforms.tiktok import resolve_tiktok_video_id
+        vid = resolve_tiktok_video_id(str(it.get("url"))) or ""
+    if not vid:
+        return None
+    title = (it.get("title") or it.get("fulltitle")
+             or it.get("description") or vid).strip()
+    cover = it.get("thumbnail") or ""
+    if not cover:
+        thumbs = it.get("thumbnails") or []
+        if isinstance(thumbs, list) and thumbs:
+            cover = (thumbs[-1] or {}).get("url") or ""
+    return {
+        "item_id": vid,
+        "desc": title,
+        "media_type": "video",
+        "cover_url": cover or "",
+        "create_time": _num(it.get("timestamp") or it.get("release_timestamp")),
+        "like_count": _num(it.get("like_count")),
+        "comment_count": _num(it.get("comment_count")),
+        "collect_count": 0,
+        "share_count": 0,
+        "play_count": _num(it.get("view_count")),
+        "status": "",
+        "xsec_token": "",
+        "raw_json": json.dumps(it, ensure_ascii=False)[:4000],
+    }
+
+
 def _norm_channels_work(it: dict) -> Optional[dict]:
     """视频号助手 post_list 一项 -> 本账号作品 dict。视频号视频加密不可下载,
     这里只记元数据+统计(供本账号作品展示 + 作品健康监控)。字段以真机抓包为准。"""
@@ -266,6 +300,8 @@ async def fetch_account_works(mgr: BrowserManager, identity, platform: str, uid:
     open_url = ""
     if platform == "youtube":
         return await _fetch_youtube_account_works(identity, uid, max_scrolls=max_scrolls)
+    if platform == "tiktok":
+        return await _fetch_tiktok_account_works(identity, uid, max_scrolls=max_scrolls)
     if platform == "xhs":
         # 小红书:站内「我」入口拿真实主页链接(带 xsec_token);失败再退回 uid 直开
         open_url, self_uid = await _self_profile_link(mgr, identity, "xhs")
@@ -348,6 +384,52 @@ async def _fetch_youtube_account_works(identity, uid: str,
                         acc.nickname = author["nickname"]
                     if author.get("sec_uid") and not acc.sec_uid:
                         acc.sec_uid = author["sec_uid"]
+                    if author.get("avatar"):
+                        acc.avatar = author["avatar"] or acc.avatar
+                    if author.get("follower_count"):
+                        acc.follower_count = author["follower_count"]
+                    if author.get("aweme_count"):
+                        acc.aweme_count = author["aweme_count"]
+                    elif out:
+                        acc.aweme_count = max(acc.aweme_count or 0, len(out))
+                    s.add(acc); s.commit()
+        except Exception:
+            pass
+    return out, ("" if out else (err or "未抓到作品"))
+
+
+async def _fetch_tiktok_account_works(identity, uid: str,
+                                      max_scrolls: int = 14) -> Tuple[List[dict], str]:
+    """TikTok 本账号作品:yt-dlp 拉自己的 @handle。"""
+    from ..db import get_session
+    from ..models import DouyinAccount
+    from ..platforms.tiktok import fetch_tiktok_videos
+
+    state, proxy, user_ref = "", "", (uid or "").strip()
+    if identity and identity.account_id is not None:
+        with get_session() as s:
+            acc = s.get(DouyinAccount, identity.account_id)
+            if acc:
+                state = acc.storage_state or ""
+                proxy = acc.proxy or ""
+                user_ref = (acc.douyin_id or acc.sec_uid or user_ref or "").strip()
+    if not user_ref:
+        return [], "missing_uid:账号缺 @handle,请先点账号「刷新资料」再同步作品"
+    limit = max(10, min(int(max_scrolls or 14) * 5, 50))
+    entries, author, err = await fetch_tiktok_videos(
+        user_ref, known_ids=set(), limit=limit, proxy=proxy, state_json=state)
+    out = [w for w in (_norm_tiktok_work(it) for it in (entries or [])) if w]
+    if author and identity and identity.account_id is not None:
+        try:
+            with get_session() as s:
+                acc = s.get(DouyinAccount, identity.account_id)
+                if acc:
+                    if author.get("nickname") and not acc.nickname:
+                        acc.nickname = author["nickname"]
+                    if author.get("sec_uid") and not acc.sec_uid:
+                        acc.sec_uid = author["sec_uid"]
+                    if author.get("douyin_id") and not acc.douyin_id:
+                        acc.douyin_id = author["douyin_id"]
                     if author.get("avatar"):
                         acc.avatar = author["avatar"] or acc.avatar
                     if author.get("follower_count"):

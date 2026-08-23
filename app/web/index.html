@@ -94,6 +94,7 @@
   .pswitch button.active[data-pf="kuaishou"] { background:rgba(255,121,2,.16); color:#ff7902; border-color:rgba(255,121,2,.4); }
   .pswitch button.active[data-pf="shipinhao"] { background:rgba(7,193,96,.16); color:#07c160; border-color:rgba(7,193,96,.4); }
   .pswitch button.active[data-pf="youtube"] { background:rgba(255,0,0,.16); color:#ff4444; border-color:rgba(255,0,0,.4); }
+  .pswitch button.active[data-pf="tiktok"] { background:rgba(254,44,85,.16); color:#fe2c55; border-color:rgba(37,244,238,.45); }
   .hidden { display:none !important; }
 
   /* ════ 小红书:浅色暖调主题(整页随平台切换;抖音保持深色) ════ */
@@ -185,6 +186,20 @@
   body.pf-youtube .badge-lite { color:var(--acc); background:var(--acc-soft); }
   body.pf-youtube input[type=date]::-webkit-calendar-picker-indicator,
   body.pf-youtube input[type=datetime-local]::-webkit-calendar-picker-indicator { filter:invert(.7); }
+
+  /* ════ TikTok:深色 + 招牌粉 #FE2C55 / 青 #25F4EE ════ */
+  body.pf-tiktok {
+    --acc:#fe2c55; --acc-hover:#ff4d6d; --acc-soft:rgba(254,44,85,.15); --acc-ring:rgba(254,44,85,.38);
+    --info:#25f4ee; --info-soft:rgba(37,244,238,.15);
+    background:
+      radial-gradient(1200px 600px at 80% -10%, rgba(254,44,85,.10), transparent 60%),
+      radial-gradient(900px 500px at 0% 0%, rgba(37,244,238,.06), transparent 55%),
+      var(--bg);
+  }
+  body.pf-tiktok .brand-mark { background:linear-gradient(135deg,#25f4ee 0 46%,#fe2c55 54% 100%); box-shadow:0 4px 14px -4px var(--acc-ring); }
+  body.pf-tiktok .badge-lite { color:var(--acc); background:var(--acc-soft); }
+  body.pf-tiktok input[type=date]::-webkit-calendar-picker-indicator,
+  body.pf-tiktok input[type=datetime-local]::-webkit-calendar-picker-indicator { filter:invert(.7); }
 
   /* ── 小红书笔记瀑布流卡片 ── */
   .xhs-grid { columns:240px; column-gap:14px; }
@@ -1243,6 +1258,7 @@
     <button type="button" data-pf="kuaishou" onclick="switchPlatform('kuaishou')">快手</button>
     <button type="button" data-pf="shipinhao" onclick="switchPlatform('shipinhao')">视频号</button>
     <button type="button" data-pf="youtube" onclick="switchPlatform('youtube')">YouTube</button>
+    <button type="button" data-pf="tiktok" onclick="switchPlatform('tiktok')">TikTok</button>
   </div>
   <span class="spacer"></span>
   <span class="engine" id="engine-status"><span class="dot live"></span><span class="engine-text">引擎运行中</span></span>
@@ -1289,7 +1305,7 @@
     </div>
     <div class="chart-wrap" id="overview-chart"><div class="chart-empty">加载中…</div></div>
   </div>
-  <div class="card"><div class="hint">顶部切换 <b>抖音 / 小红书 / 快手 / 视频号 / YouTube</b> 平台,各平台拥有独立的账号与数据;左侧切换模块进行管理。小红书支持 <b>创作者笔记</b> 与 <b>关键词</b> 两种监控;快手支持 <b>创作者作品</b> 监控、自动评论与发布。<b>视频号</b>因助手接口只有本账号数据,仅支持 <b>账号 / 本账号作品·数据 / 发布</b>。<b>YouTube</b> 支持 <b>频道监控下载 / 本账号作品·数据 / Studio 发布</b>(暂无评论监控与关注粉丝私信)。通知与下载设置为全局共用。</div></div>
+  <div class="card"><div class="hint">顶部切换 <b>抖音 / 小红书 / 快手 / 视频号 / YouTube / TikTok</b> 平台,各平台拥有独立的账号与数据;左侧切换模块进行管理。小红书支持 <b>创作者笔记</b> 与 <b>关键词</b> 两种监控;快手支持 <b>创作者作品</b> 监控、自动评论与发布。<b>视频号</b>因助手接口只有本账号数据,仅支持 <b>账号 / 本账号作品·数据 / 发布</b>。<b>YouTube</b> 支持 <b>频道监控下载 / 直播录制 / 本账号作品·数据 / Studio 发布</b>(暂无评论监控与关注粉丝私信)。<b>TikTok</b> 支持 <b>作品监控下载 / 本账号作品·数据 / Studio 发布</b>(暂无评论、直播、关注粉丝私信)。通知与下载设置为全局共用。</div></div>
   </section>
 
   <section data-panel="accounts">
@@ -1313,6 +1329,8 @@
         <button class="ghost sh-only cookie-fallback" style="display:none" onclick="toggleCookie()">Cookie 粘贴</button>
         <button class="yt-only qr-only" onclick="startYoutubeLogin()"><svg><use href="#i-logo"/></svg>YouTube 登录</button>
         <button class="ghost yt-only" onclick="toggleCookie()">Cookie 粘贴</button>
+        <button class="tt-only qr-only" onclick="startTiktokLogin()"><svg><use href="#i-logo"/></svg>TikTok 登录</button>
+        <button class="ghost tt-only" onclick="toggleCookie()">Cookie 粘贴</button>
       </div>
       <div id="docker-login-hint" class="hint" style="border-left:3px solid var(--warn);padding-left:10px">
         Docker / 无桌面模式：扫码登录已关闭。请用上方「Cookie 粘贴」从本机浏览器复制完整 Cookie 登录。

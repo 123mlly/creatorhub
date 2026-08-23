@@ -376,15 +376,17 @@ async function refreshOverviewChart() {
 
 // ─── 平台切换(抖音 / 小红书) ───
 let PLATFORM = "douyin";
-const PF_NAME = { douyin: "抖音", xhs: "小红书", kuaishou: "快手", shipinhao: "视频号", youtube: "YouTube" };
-const PF_ALL = ["douyin", "xhs", "kuaishou", "shipinhao", "youtube"];
+const PF_NAME = { douyin: "抖音", xhs: "小红书", kuaishou: "快手", shipinhao: "视频号", youtube: "YouTube", tiktok: "TikTok" };
+const PF_ALL = ["douyin", "xhs", "kuaishou", "shipinhao", "youtube", "tiktok"];
 // 是否支持「发布」面板
-function pfHasPublish(pf) { return pf === "xhs" || pf === "kuaishou" || pf === "douyin" || pf === "shipinhao" || pf === "youtube"; }
+function pfHasPublish(pf) { return pf === "xhs" || pf === "kuaishou" || pf === "douyin" || pf === "shipinhao" || pf === "youtube" || pf === "tiktok"; }
 // 视频号只有「本账号」数据(助手接口本账号),不支持监控他人作品/评论
 function pfIsChannels(pf) { return pf === "shipinhao"; }
 function pfIsYoutube(pf) { return pf === "youtube"; }
-// hub 子页:关注/粉丝/私信对视频号与 YouTube 均不可用
-function pfHubLite(pf) { return pfIsChannels(pf) || pfIsYoutube(pf); }
+function pfIsTiktok(pf) { return pf === "tiktok"; }
+function pfYtLike(pf) { return pfIsYoutube(pf) || pfIsTiktok(pf); }
+// hub 子页:关注/粉丝/私信对视频号 / YouTube / TikTok 均不可用
+function pfHubLite(pf) { return pfIsChannels(pf) || pfYtLike(pf); }
 function switchPlatform(pf) {
   if (!PF_ALL.includes(pf)) pf = "douyin";
   PLATFORM = pf;
@@ -416,6 +418,7 @@ function applyPlatformUI() {
   document.body.classList.toggle("pf-kuaishou", PLATFORM === "kuaishou");
   document.body.classList.toggle("pf-shipinhao", PLATFORM === "shipinhao");
   document.body.classList.toggle("pf-youtube", PLATFORM === "youtube");
+  document.body.classList.toggle("pf-tiktok", PLATFORM === "tiktok");
   // 视频号:只有本账号数据,隐藏「监控他人作品/评论」相关入口(.notsh-only)
   document.body.classList.toggle("pf-channels", pfIsChannels(PLATFORM));
   document.querySelectorAll(".pswitch button").forEach(b =>
@@ -425,16 +428,17 @@ function applyPlatformUI() {
   document.querySelectorAll(".ks-only").forEach(e => e.classList.toggle("hidden", PLATFORM !== "kuaishou"));
   document.querySelectorAll(".sh-only").forEach(e => e.classList.toggle("hidden", PLATFORM !== "shipinhao"));
   document.querySelectorAll(".yt-only").forEach(e => e.classList.toggle("hidden", PLATFORM !== "youtube"));
+  document.querySelectorAll(".tt-only").forEach(e => e.classList.toggle("hidden", PLATFORM !== "tiktok"));
   document.querySelectorAll(".dy-yt-only").forEach(e =>
-    e.classList.toggle("hidden", PLATFORM !== "douyin" && PLATFORM !== "youtube"));
+    e.classList.toggle("hidden", PLATFORM !== "douyin" && PLATFORM !== "youtube" && PLATFORM !== "tiktok"));
   document.querySelectorAll(".notsh-only").forEach(e => {
     const hide = pfIsChannels(PLATFORM)
-      || (pfIsYoutube(PLATFORM) && e.classList.contains("no-yt-only"));
+      || (pfYtLike(PLATFORM) && e.classList.contains("no-yt-only"));
     e.classList.toggle("hidden", hide);
   });
   document.querySelectorAll(".no-yt-only").forEach(e => {
     if (e.classList.contains("notsh-only")) return; // 已由上方合并处理
-    e.classList.toggle("hidden", pfIsYoutube(PLATFORM));
+    e.classList.toggle("hidden", pfYtLike(PLATFORM));
   });
   document.querySelectorAll(".meta-scope").forEach(e => {
     e.textContent = (PF_NAME[PLATFORM] || "当前平台") + "内独立";
@@ -442,14 +446,16 @@ function applyPlatformUI() {
   // 发布面板入口:抖音 / 小红书 / 快手 / 视频号
   document.querySelectorAll(".pub-only").forEach(e => e.classList.toggle("hidden", !pfHasPublish(PLATFORM)));
   // 发布面板文案随平台切换
-  const ks = PLATFORM === "kuaishou", dy = PLATFORM === "douyin", sph = PLATFORM === "shipinhao", yt = PLATFORM === "youtube";
+  const ks = PLATFORM === "kuaishou", dy = PLATFORM === "douyin", sph = PLATFORM === "shipinhao", yt = PLATFORM === "youtube", tt = PLATFORM === "tiktok";
   const pubSub = $("pub-head-sub");
   if (pubSub) pubSub.textContent = dy ? "上传图集 / 视频到抖音创作平台(实验性)"
     : ks ? "上传图集 / 视频到快手创作平台(实验性)"
     : sph ? "上传视频到视频号助手(实验性)"
-    : yt ? "上传视频到 YouTube Studio(实验性)" : "上传图集 / 视频到小红书(实验性)";
-  if ($("pub-head-lead")) $("pub-head-lead").textContent = (ks || dy || sph || yt) ? "发布作品" : "发布笔记";
-  if ($("pub-title")) $("pub-title").placeholder = yt ? "视频标题(最多 100 字)"
+    : yt ? "上传视频到 YouTube Studio(实验性)"
+    : tt ? "上传视频到 TikTok Studio(实验性)" : "上传图集 / 视频到小红书(实验性)";
+  if ($("pub-head-lead")) $("pub-head-lead").textContent = (ks || dy || sph || yt || tt) ? "发布作品" : "发布笔记";
+  if ($("pub-title")) $("pub-title").placeholder = tt ? "视频标题(最多 150 字)"
+    : yt ? "视频标题(最多 100 字)"
     : (ks || dy || sph) ? "给作品起个标题" : "给笔记起个标题";
   if ($("pub-hint")) $("pub-hint").textContent = dy
     ? "发布通过自动化抖音创作平台(creator.douyin.com)完成,会弹出浏览器窗口。首次或触发风控时抖音会要求「短信验证码/扫码」验证,请在弹出窗口里手动完成(最多等 5 分钟,验证通过后自动继续发布);视频上传后需等转码,发布稍慢。⚠️ 因需本人验证,定时/无人值守发布可能被此步骤挡住,建议发布时在场。"
@@ -459,9 +465,11 @@ function applyPlatformUI() {
     ? "发布通过自动化视频号助手(channels.weixin.qq.com)完成,会弹出浏览器窗口。视频号视频上传需转码、发布前可能要求封面/实名/过脸验证,请在弹出窗口里手动处理(建议发布时在场)。⚠️ 发布页在 wujie 微前端里,选择器随视频号改版可能失效。"
     : yt
     ? "发布通过自动化 YouTube Studio(studio.youtube.com)完成,会弹出浏览器窗口。仅支持视频;上传后需走完详情→可见性步骤并点 Publish。遇验证码/频道未创建/需补缩略图请在窗口里手动处理(建议发布时在场)。⚠️ Studio 改版可能导致选择器失效。"
+    : tt
+    ? "发布通过自动化 TikTok Studio(tiktok.com/tiktokstudio/upload)完成,会弹出浏览器窗口。仅支持视频;遇验证码/需补封面请在窗口里手动处理(建议发布时在场)。⚠️ Studio 改版可能导致选择器失效。"
     : "发布通过自动化小红书创作平台完成,会弹出浏览器窗口;若遇验证码/需补封面可在窗口里手动处理。定时任务由后台引擎到点执行。";
-  // YouTube 仅视频:强制类型并隐藏图集选项交互
-  if (yt && $("pub-type")) {
+  // YouTube / TikTok 仅视频
+  if ((yt || tt) && $("pub-type")) {
     $("pub-type").value = "video";
     onPubType();
   }
@@ -488,11 +496,13 @@ function applyPlatformUI() {
     ? "完整 Cookie(含 a1;发布需创作者会话)"
     : PLATFORM === "kuaishou" ? "完整 Cookie(含 userId 与 web_st)"
     : PLATFORM === "youtube" ? "完整 Cookie(含 YouTube / Google 登录 Cookie)"
+    : PLATFORM === "tiktok" ? "完整 Cookie(含 sessionid / sid_tt)"
     : "完整 Cookie(含 sessionid)";
   if ($("ck-val")) $("ck-val").placeholder = PLATFORM === "xhs"
     ? "从 creator.xiaohongshu.com 登录后复制完整 Cookie"
     : PLATFORM === "kuaishou" ? "从 www.kuaishou.com 登录后复制完整 Cookie"
     : PLATFORM === "youtube" ? "从 youtube.com 登录后复制完整 Cookie(含 SID / LOGIN_INFO 等)"
+    : PLATFORM === "tiktok" ? "从 tiktok.com 登录后复制完整 Cookie(含 sessionid)"
     : "从浏览器开发者工具复制完整 Cookie";
   syncMonitorKindOptions();
   applyMonitorForm();
@@ -501,8 +511,8 @@ function applyPlatformUI() {
     const cur = (document.querySelector('.navitem.active') || {}).dataset;
     if (cur && ["monitors", "comments", "autocomment"].includes(cur.tab)) switchTab("hub");
   }
-  // YouTube:无评论/自动评论,停在这些面板时切到账号管理
-  if (pfIsYoutube(PLATFORM)) {
+  // YouTube / TikTok:无评论/自动评论,停在这些面板时切到账号管理
+  if (pfYtLike(PLATFORM)) {
     const cur = (document.querySelector('.navitem.active') || {}).dataset;
     if (cur && ["comments", "autocomment"].includes(cur.tab)) switchTab("hub");
   }
@@ -530,6 +540,8 @@ function syncMonitorKindOptions() {
   } else if (PLATFORM === "douyin" || PLATFORM === "youtube") {
     opts.push(["creator", "作品监控(盯新视频)"]);
     opts.push(["live", "直播监控(开播提醒并录制)"]);
+  } else if (PLATFORM === "tiktok") {
+    opts.push(["creator", "作品监控(盯新视频)"]);
   } else if (PLATFORM === "kuaishou") {
     opts.push(["creator", "创作者作品(盯新作品)"]);
   }
@@ -578,6 +590,12 @@ function applyMonitorForm() {
     if (title) title.innerHTML = '添加频道监控 <span class="sub">监控并下载新视频(yt-dlp)</span>';
     if (lbl) lbl.textContent = "频道链接 / @handle / 频道 ID";
     $("t-url").placeholder = "粘贴 youtube.com/@xxx、/channel/UCxxx 或 @handle";
+    return;
+  }
+  if (PLATFORM === "tiktok") {
+    if (title) title.innerHTML = '添加用户监控 <span class="sub">监控并下载新视频(yt-dlp)</span>';
+    if (lbl) lbl.textContent = "主页链接 / @handle";
+    $("t-url").placeholder = "粘贴 tiktok.com/@xxx 或 @handle";
     return;
   }
   if (PLATFORM === "douyin" || PLATFORM === "kuaishou") {
@@ -824,6 +842,23 @@ async function startYoutubeLogin() {
       + "<span style='opacity:.85'>每个频道再登一次可选不同频道，对应多条 YouTube 账号。</span>";
     pollLogin(res.task_id);
   } catch (e) { $("qrstatus").textContent = "启动失败: " + e.message; toast("YouTube 登录启动失败:" + e.message, "err"); }
+}
+
+// ─── TikTok 浏览器登录 ───
+async function startTiktokLogin() {
+  if (!QR_LOGIN_ENABLED) return toast("Docker 模式已禁用扫码登录，请使用 Cookie 粘贴", "err");
+  const proxy = await choosePreLoginProxy();
+  if (proxy === null) return;
+  $("cookiebox").style.display = "none";
+  $("qrbox").style.display = "block";
+  $("qrstatus").textContent = "正在打开 TikTok 窗口…";
+  try {
+    const res = await api(loginStartUrl("/api/login/tiktok/start", proxy), { method: "POST" });
+    $("qrstatus").innerHTML = "🪟 已弹出 <b>TikTok</b> 窗口。请自己点「登录」完成扫码/邮箱(看到头像后再等两秒，会自动关窗)。<br>"
+      + "若提示<b>频繁操作</b>：先停，等半小时再试；或用日常 Chrome 登录后把 Cookie 粘到本页。<br>"
+      + "<span style='opacity:.85'>代理选「不使用」。不要连续重试，TikTok 会按 IP 限流。</span>";
+    pollLogin(res.task_id);
+  } catch (e) { $("qrstatus").textContent = "启动失败: " + e.message; toast("TikTok 登录启动失败:" + e.message, "err"); }
 }
 
 // ─── Cookie 登录 ───
@@ -1553,6 +1588,7 @@ function workLink(platform, id) {
   if (platform === "kuaishou") return "https://www.kuaishou.com/short-video/" + id;
   if (platform === "shipinhao") return "https://channels.weixin.qq.com/platform/post/list";
   if (platform === "youtube") return "https://www.youtube.com/watch?v=" + id;
+  if (platform === "tiktok") return "https://www.tiktok.com/@tiktok/video/" + id;
   return "https://www.douyin.com/video/" + id;
 }
 function openWork(platform, id) { try { window.open(workLink(platform, id), "_blank", "noopener"); } catch (e) {} }
@@ -1821,8 +1857,8 @@ function accOptions(list, ph) {
 }
 function populateAccountSelect() {
   const sel = $("t-acc"); if (!sel) return;
-  const required = PLATFORM === "xhs" || PLATFORM === "douyin" || PLATFORM === "youtube";
-  const platformName = PLATFORM === "xhs" ? "小红书" : "抖音";
+  const required = PLATFORM === "xhs" || PLATFORM === "douyin" || PLATFORM === "youtube" || PLATFORM === "tiktok";
+  const platformName = PF_NAME[PLATFORM] || "抖音";
   sel.innerHTML = accOptions(ACCOUNTS, required ? `请选择${platformName}账号(必选)` : "不指定账号");
   // 抖音匿名主页可能返回风控后的旧快照；作品监控与小红书一样必须使用登录态。
   if (required && ACCOUNTS.length) sel.value = String(ACCOUNTS[0].id);
@@ -2189,7 +2225,7 @@ function filterShareAccounts() {
   const old = sel.value;
   const platform = shareAccountPlatform();
   const hasDetectedLink = !!SHARE_LINKS.length;
-  const knownAccountPlatform = ["douyin", "xhs", "kuaishou", "shipinhao", "youtube"].includes(platform);
+  const knownAccountPlatform = ["douyin", "xhs", "kuaishou", "shipinhao", "youtube", "tiktok"].includes(platform);
   const rows = knownAccountPlatform
     ? SHARE_ACCOUNTS.filter(a => a.platform === platform)
     : [];
@@ -2508,10 +2544,10 @@ async function addMonitor() {
   if (target_kind === "live" && PLATFORM !== "douyin" && PLATFORM !== "youtube") target_kind = "creator";
   if (PLATFORM === "xhs" && !["creator", "keyword"].includes(target_kind)) target_kind = "creator";
   if ((PLATFORM === "douyin" || PLATFORM === "youtube") && !["creator", "live"].includes(target_kind)) target_kind = "creator";
-  if (PLATFORM === "kuaishou" || PLATFORM === "shipinhao") target_kind = "creator";
+  if (PLATFORM === "kuaishou" || PLATFORM === "shipinhao" || PLATFORM === "tiktok") target_kind = "creator";
   if (!url_or_secuid) { toast(target_kind === "keyword" ? "请输入搜索关键词" : "请输入主页链接 / 短链 / id", "err"); return; }
-  if ((PLATFORM === "xhs" || PLATFORM === "douyin" || PLATFORM === "youtube") && !$("t-acc").value) {
-    const platformName = PLATFORM === "xhs" ? "小红书" : PLATFORM === "youtube" ? "YouTube" : "抖音";
+  if ((PLATFORM === "xhs" || PLATFORM === "douyin" || PLATFORM === "youtube" || PLATFORM === "tiktok") && !$("t-acc").value) {
+    const platformName = PLATFORM === "xhs" ? "小红书" : PLATFORM === "youtube" ? "YouTube" : PLATFORM === "tiktok" ? "TikTok" : "抖音";
     if (!ACCOUNTS.length) { toast(`请先在「账号」里完成${platformName}扫码登录`, "err"); switchTab("accounts"); return; }
     toast(`${platformName}监控必须选择一个已登录账号`, "err"); return;
   }
@@ -2526,7 +2562,7 @@ async function addMonitor() {
           account_id: $("t-acc").value ? +$("t-acc").value : null,
           interval_seconds: +$("t-interval").value,
           initial_backfill_count: (target_kind === "live") ? 0
-            : ((PLATFORM === "douyin" || PLATFORM === "youtube") ? +$("t-backfill").value : 0),
+            : ((PLATFORM === "douyin" || PLATFORM === "youtube" || PLATFORM === "tiktok") ? +$("t-backfill").value : 0),
           download_dir: $("t-dir").value.trim(),
           video_quality: PLATFORM === "xhs" ? "" : $("t-quality").value,
           alias: $("t-alias").value.trim(), group_name: getMetaValue("t-group").trim(),
@@ -2836,8 +2872,7 @@ function noteCard(r) {
       <div class="ncard-actions">
         <span class="pill ${r.download_status}" style="flex:1;justify-content:center" title="${esc(r.error || "")}">${contentStatusLabel(r.download_status, r.media_type)}${r.error ? " ⓘ" : ""}</span>
         ${r.download_status === "failed" ? `<button class="ghost sm" onclick="retryDl(${r.id})">重试</button>` : ""}
-        ${((PLATFORM === "douyin" || PLATFORM === "kuaishou") && r.download_status === "done") ? `<button class="ghost sm" onclick="pickRepostTarget(${r.id})">转发</button>` : ""}
-        ${(PLATFORM === "xhs" && r.download_status === "done") ? `<button class="ghost sm" onclick="pickRepostTarget(${r.id})">转发</button>` : ""}
+        ${((PLATFORM === "douyin" || PLATFORM === "kuaishou" || PLATFORM === "xhs" || PLATFORM === "youtube" || PLATFORM === "tiktok") && r.download_status === "done") ? `<button class="ghost sm" onclick="pickRepostTarget(${r.id})">转发</button>` : ""}
         <button class="ghost sm" onclick="delContent(${r.id})">删除</button>
       </div>
     </div>
@@ -2905,7 +2940,7 @@ async function refreshContents() {
         <div class="content-status-row"><span class="pill ${r.download_status}">${contentStatusLabel(r.download_status, r.media_type)}</span>${r.error ? `<span class="warn-ic" data-tip="${esc(r.error)}">${ic("i-info")}</span>` : ""}</div>
         <div class="content-action-buttons">
           ${r.download_status === "failed" ? `<button class="ghost sm" onclick="retryDl(${r.id})">重试</button>` : ""}
-          ${((PLATFORM === "douyin" || PLATFORM === "kuaishou" || PLATFORM === "xhs") && r.download_status === "done") ? `<button class="ghost sm content-action-primary" onclick="pickRepostTarget(${r.id})">${ic("i-send")}转发</button>` : ""}
+          ${((PLATFORM === "douyin" || PLATFORM === "kuaishou" || PLATFORM === "xhs" || PLATFORM === "youtube" || PLATFORM === "tiktok") && r.download_status === "done") ? `<button class="ghost sm content-action-primary" onclick="pickRepostTarget(${r.id})">${ic("i-send")}转发</button>` : ""}
           <button class="ghost sm content-action-delete" onclick="delContent(${r.id})" data-tip="删除作品" aria-label="删除作品">${ic("i-trash")}</button>
         </div>
       </td>
@@ -3207,12 +3242,13 @@ document.addEventListener("keydown", e => {
 // ─── 发布到小红书 ───
 function populatePubAcc() {
   const sel = $("pub-acc"); if (!sel) return;
-  // 小红书发布需创作者号;抖音 / 快手 / YouTube 有登录态即可(走浏览器自动化)
+  // 小红书发布需创作者号;其余平台有登录态即可(走浏览器自动化)
   const list = PLATFORM === "xhs" ? ACCOUNTS.filter(a => a.has_creator) : ACCOUNTS;
   const ph = list.length ? "选择发布账号"
     : (PLATFORM === "kuaishou" ? "请先完成「快手扫码/创作者登录」"
       : PLATFORM === "douyin" ? "请先完成「抖音扫码/创作者登录」"
       : PLATFORM === "youtube" ? "请先完成「YouTube 登录」"
+      : PLATFORM === "tiktok" ? "请先完成「TikTok 登录」"
       : PLATFORM === "shipinhao" ? "请先完成「视频号登录」"
       : "请先完成「小红书创作者登录」");
   sel.innerHTML = accOptions(list, ph);
@@ -3263,8 +3299,8 @@ function bindPubFilePicker() {
 async function addPublish() {
   const acc = $("pub-acc").value;
   if (!acc) { toast("请选择" + (PF_NAME[PLATFORM] || "发布") + "账号", "err"); return; }
-  if (PLATFORM === "youtube" && $("pub-type") && $("pub-type").value !== "video") {
-    toast("YouTube 目前仅支持上传视频", "err"); return;
+  if ((PLATFORM === "youtube" || PLATFORM === "tiktok") && $("pub-type") && $("pub-type").value !== "video") {
+    toast((PLATFORM === "tiktok" ? "TikTok" : "YouTube") + " 目前仅支持上传视频", "err"); return;
   }
   const files = $("pub-files").files;
   if (!files.length) { toast("请先选择要发布的文件", "err"); return; }
@@ -3311,6 +3347,8 @@ async function refreshPublish() {
     </td></tr>`).join("") || empty(7, "暂无发布任务", "i-send",
       PLATFORM === "kuaishou" ? "上传图集/视频加入队列(发布到快手创作平台)"
       : PLATFORM === "douyin" ? "上传图集/视频加入队列(发布到抖音创作平台)"
+      : PLATFORM === "youtube" ? "上传视频加入队列(发布到 YouTube Studio)"
+      : PLATFORM === "tiktok" ? "上传视频加入队列(发布到 TikTok Studio)"
       : "上传图集/视频加入队列,或在抖音作品上点「发小红书」转发过来");
 }
 // 视频号作品无公开链接:用该账号已登录浏览器打开图文/视频管理页查看
@@ -3391,27 +3429,29 @@ async function _pickXhsAccount(withOff) {
   return +v;
 }
 let REPOST_ID = null;
-let REPOST_TARGET = "xhs";           // xhs / douyin / shipinhao / youtube
-const REPOST_PF_NAME = { xhs: "小红书", douyin: "抖音", shipinhao: "视频号", youtube: "YouTube" };
+let REPOST_TARGET = "xhs";           // xhs / douyin / shipinhao / youtube / tiktok
+const REPOST_PF_NAME = { xhs: "小红书", douyin: "抖音", shipinhao: "视频号", youtube: "YouTube", tiktok: "TikTok" };
 const repostXhs = (id) => openRepost(id, "xhs");
 const repostDouyin = (id) => openRepost(id, "douyin");
 const repostChannels = (id) => openRepost(id, "shipinhao");
 const repostYoutube = (id) => openRepost(id, "youtube");
+const repostTiktok = (id) => openRepost(id, "tiktok");
 async function pickRepostTarget(id) {
   const rec = CONTENTS.find(r => r.id === id);
   const options = [];
   if (PLATFORM !== "xhs") options.push({ value: "xhs", label: "小红书" });
   if (PLATFORM !== "shipinhao") options.push({ value: "shipinhao", label: "视频号" });
   if (PLATFORM === "xhs") options.push({ value: "douyin", label: "抖音" });
-  // YouTube Studio 仅支持视频
+  // YouTube / TikTok Studio 仅支持视频
   if (!rec || rec.media_type === "video") {
     options.push({ value: "youtube", label: "YouTube" });
+    options.push({ value: "tiktok", label: "TikTok" });
   }
   if (!options.length) { toast("当前作品没有可转发的目标平台", "err"); return; }
   const target = await uiSelect({
     title: "转发作品",
     hint: "选择要发布到的平台，下一步可以继续编辑标题、文案和发布时间。"
-      + (rec && rec.media_type !== "video" ? "（图集不可转发到 YouTube）" : ""),
+      + (rec && rec.media_type !== "video" ? "（图集不可转发到 YouTube / TikTok）" : ""),
     options,
     value: options[0].value,
   });
@@ -3420,11 +3460,11 @@ async function pickRepostTarget(id) {
 }
 async function openRepost(id, target) {
   const rec = CONTENTS.find(r => r.id === id);
-  if (target === "youtube" && rec && rec.media_type !== "video") {
-    toast("YouTube 目前仅支持转发视频", "err");
+  if ((target === "youtube" || target === "tiktok") && rec && rec.media_type !== "video") {
+    toast((target === "tiktok" ? "TikTok" : "YouTube") + " 目前仅支持转发视频", "err");
     return;
   }
-  // 拉取目标平台可发布账号:小红书需创作号;抖音/视频号/YouTube 需任一登录态
+  // 拉取目标平台可发布账号:小红书需创作号;其余需任一登录态
   const all = await api("/api/accounts?platform=" + target);
   const accs = target === "xhs"
     ? all.filter(a => a.has_creator)
@@ -3434,6 +3474,7 @@ async function openRepost(id, target) {
       xhs: "请先在小红书账号页完成「创作者登录」(发布用)",
       shipinhao: "请先在视频号账号页完成「视频号登录」",
       youtube: "请先在 YouTube 账号页完成「YouTube 登录」或 Cookie 粘贴",
+      tiktok: "请先在 TikTok 账号页完成「TikTok 登录」或 Cookie 粘贴",
       douyin: "请先在抖音账号页完成登录(扫码/创作者/Cookie)",
     }[target] || "请先添加并登录目标平台账号";
     toast(loginHint, "err");
@@ -3443,20 +3484,22 @@ async function openRepost(id, target) {
   const isDy = target === "douyin";
   const isChannels = target === "shipinhao";
   const isYt = target === "youtube";
-  const cap = isYt ? 100 : isDy ? 30 : isChannels ? 16 : 20;
+  const isTt = target === "tiktok";
+  const cap = isTt ? 150 : isYt ? 100 : isDy ? 30 : isChannels ? 16 : 20;
   const pname = REPOST_PF_NAME[target] || "小红书";
   $("rp-head").textContent = "发" + pname + " · 编辑后推送";
   $("rp-title-label").textContent = `标题(≤${cap} 字)`;
   $("rp-title").maxLength = cap;
   $("rp-title").placeholder = target === "xhs" ? "给笔记起个标题"
-    : isYt ? "给视频起个标题" : "给作品起个标题";
+    : (isYt || isTt) ? "给视频起个标题" : "给作品起个标题";
   $("rp-acc").innerHTML = accs.map(a => `<option value="${a.id}">${esc(a.nickname)}</option>`).join("");
   const desc = (rec && rec.desc) || "";
   $("rp-title").value = desc.slice(0, cap);   // 默认用作品描述前若干字当标题
   $("rp-desc").value = desc;
   $("rp-topics").value = "";
   $("rp-when").value = ""; dtSyncAll();
-  $("rp-msg").textContent = isYt ? "将通过 YouTube Studio 上传(仅视频)" : "";
+  $("rp-msg").textContent = isYt ? "将通过 YouTube Studio 上传(仅视频)"
+    : isTt ? "将通过 TikTok Studio 上传(仅视频)" : "";
   $("rp-src").textContent = rec ? `来源:${rec.media_type === "images" ? "图集" : "视频"} · ${esc((rec.desc || "(无描述)").slice(0, 30))}` : "";
   // 抖音发布设置(可见性 / 保存权限)仅目标为抖音时显示
   if ($("rp-dy-opts")) $("rp-dy-opts").style.display = isDy ? "flex" : "none";
@@ -3574,13 +3617,15 @@ async function submitRepost() {
   const btn = $("rp-submit"); btn.disabled = true;
   $("rp-msg").textContent = "提交中…";
   let descVal = $("rp-desc").value;
-  if (REPOST_TARGET === "youtube" && !descVal.trim()) {
+  if ((REPOST_TARGET === "youtube" || REPOST_TARGET === "tiktok") && !descVal.trim()) {
     descVal = $("rp-title").value.trim();
   }
   const body = {
     account_id: accId,
     title: (REPOST_TARGET === "youtube"
       ? $("rp-title").value.trim().slice(0, 100)
+      : REPOST_TARGET === "tiktok"
+      ? $("rp-title").value.trim().slice(0, 150)
       : $("rp-title").value.trim()),
     desc: descVal,
     topics: $("rp-topics").value.trim(),

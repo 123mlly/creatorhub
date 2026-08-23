@@ -30,7 +30,7 @@ from .browser import (BrowserManager, cookie_string_to_state,
                       interactive_xhs_login, interactive_xhs_creator_login,
                       interactive_ks_login, interactive_ks_creator_login,
                       interactive_channels_login, interactive_channels_creator_login,
-                      interactive_youtube_login,
+                      interactive_youtube_login, interactive_tiktok_login,
                       fetch_self_profile, fetch_xhs_self_profile, fetch_ks_self_profile,
                       fetch_channels_self_profile,
                       fetch_account_works, fetch_follows, fetch_dm_conversations,
@@ -59,6 +59,11 @@ from .platforms.youtube import (
     resolve_youtube_channel_ref,
     fetch_youtube_self_profile,
     parse_yt_self_user,
+)
+from .platforms.tiktok import (
+    resolve_tiktok_user_ref,
+    fetch_tiktok_self_profile,
+    parse_tt_self_user,
 )
 from .platforms.channels import parse_self_user as parse_channels_self_user
 from .engine import Downloader, MonitorEngine
@@ -263,6 +268,14 @@ async def _enrich_account_profile(account_id: int, state: str) -> str:
             u, err = await _fetch_channels_profile_with_retry(identity)
         elif platform == "youtube":
             u, err = await fetch_youtube_self_profile(browser, identity)
+        elif platform == "tiktok":
+            u, err = ({}, "logged_out")
+            for attempt in range(3):
+                if attempt:
+                    await asyncio.sleep(1.5 * attempt)
+                u, err = await fetch_tiktok_self_profile(browser, identity)
+                if u or err != "logged_out":
+                    break
         else:
             u, err = await fetch_self_profile(browser, identity)
     except Exception:
@@ -280,6 +293,8 @@ async def _enrich_account_profile(account_id: int, state: str) -> str:
                 p = parse_channels_self_user(u)
             elif platform == "youtube":
                 p = parse_yt_self_user(u)
+            elif platform == "tiktok":
+                p = parse_tt_self_user(u)
             else:
                 p = parse_self_user(u)
             if p.get("nickname"):
@@ -293,6 +308,9 @@ async def _enrich_account_profile(account_id: int, state: str) -> str:
             s.add(acc); s.commit()
             return "ok"
         if err == "logged_out":
+            # TikTok 刚登录后无头页常被打回登录页,不要立刻标失效
+            if platform == "tiktok":
+                return "error"
             acc.status = "invalid"
             s.add(acc); s.commit()
             return "invalid"
@@ -315,6 +333,7 @@ async def _run_login(task_id: str, creator: bool = False, account_id: int | None
           else "快手账号" if platform == "kuaishou"
           else "视频号账号" if platform == "shipinhao"
           else "YouTube 账号" if platform == "youtube"
+          else "TikTok 账号" if platform == "tiktok"
           else "创作者账号" if creator else "扫码账号")
     try:
         # 1) 准备画像 + identity(新建账号此时不写库,只用临时 profile)
@@ -364,6 +383,8 @@ async def _run_login(task_id: str, creator: bool = False, account_id: int | None
             ok, state_json, nickname = await interactive_channels_login(browser, identity)
         elif platform == "youtube":
             ok, state_json, nickname = await interactive_youtube_login(browser, identity)
+        elif platform == "tiktok":
+            ok, state_json, nickname = await interactive_tiktok_login(browser, identity)
         elif creator:
             ok, state_json, nickname = await interactive_creator_login(browser, identity)
         else:
@@ -554,10 +575,24 @@ async def login_youtube_start(proxy: str = "auto"):
             "hint": "已打开 YouTube 窗口:先完成 Google 登录,再在频道列表里点选要绑定的频道"}
 
 
+@app.post("/api/login/tiktok/start")
+async def login_tiktok_start(proxy: str = "auto"):
+    """TikTok 浏览器登录(Cookie 也可,见 /api/login/cookie)。"""
+    _require_qr_login()
+    if browser is None:
+        raise HTTPException(503, "浏览器未就绪")
+    task_id = uuid.uuid4().hex
+    login_tasks[task_id] = {"status": "opening"}
+    asyncio.create_task(_run_login(task_id, platform="tiktok", proxy_choice=proxy))
+    return {"task_id": task_id, "status": "opening",
+            "hint": "已打开 TikTok 窗口,请完成登录(扫码 / 邮箱 / 手机均可)"}
+
+
 @app.post("/api/login/cookie")
 async def login_cookie(body: CookieIn):
     """Cookie 粘贴兜底登录:转成浏览器登录态。"""
-    platform = body.platform if body.platform in ("douyin", "xhs", "kuaishou", "youtube") else "douyin"
+    platform = body.platform if body.platform in (
+        "douyin", "xhs", "kuaishou", "youtube", "tiktok") else "douyin"
     state = cookie_string_to_state(body.cookie, platform)
     with get_session() as s:
         acc = DouyinAccount(nickname=body.nickname or "Cookie账号", platform=platform,
@@ -1194,7 +1229,7 @@ async def cancel_account_action(task_id: int):
 
 _PLATFORM_HOST = {"douyin": "douyin.com", "xhs": "xiaohongshu.com",
                   "kuaishou": "kuaishou.com", "shipinhao": "weixin.qq.com",
-                  "youtube": "youtube.com"}
+                  "youtube": "youtube.com", "tiktok": "tiktok.com"}
 
 
 @app.post("/api/accounts/{account_id}/open-browser")
@@ -1223,7 +1258,8 @@ async def open_account_browser(account_id: int, url: str = ""):
     home = {"xhs": "https://www.xiaohongshu.com/",
             "kuaishou": "https://www.kuaishou.com/",
             "shipinhao": "https://channels.weixin.qq.com/platform",
-            "youtube": "https://www.youtube.com/"}.get(
+            "youtube": "https://www.youtube.com/",
+            "tiktok": "https://www.tiktok.com/"}.get(
                 platform, "https://www.douyin.com/")
     # 传了 url 且属于本平台域名 -> 停在该地址(否则回首页,防被当跳转开任意站)
     tgt = (url or "").strip()
@@ -1816,13 +1852,16 @@ def _write_account_cookie_file(account_id: int | None) -> tuple[str, str, str]:
         account_proxy = acc.proxy or ""
         account_ua = acc.ua or ""
 
-    # YouTube:走专用导出(Google Cookie 镜像到 .youtube.com + expires 规范化)
-    if platform == "youtube":
-        from .platforms.youtube import storage_state_to_cookiefile
+    # YouTube / TikTok:走专用导出(expires 规范化;YouTube 还会镜像 Google Cookie)
+    if platform in ("youtube", "tiktok"):
+        if platform == "youtube":
+            from .platforms.youtube import storage_state_to_cookiefile
+        else:
+            from .platforms.tiktok import storage_state_to_cookiefile
         from .browser.manager import cookie_string_to_state
         state_for_yt = state_text
         if not state_for_yt and raw_cookie:
-            state_for_yt = cookie_string_to_state(raw_cookie, "youtube")
+            state_for_yt = cookie_string_to_state(raw_cookie, platform)
         path = storage_state_to_cookiefile(state_for_yt)
         if not path:
             raise HTTPException(400, "所选账号没有可复用的 Cookie 登录态")
@@ -1839,6 +1878,7 @@ def _write_account_cookie_file(account_id: int | None) -> tuple[str, str, str]:
             "kuaishou": ".kuaishou.com",
             "shipinhao": ".weixin.qq.com",
             "youtube": ".youtube.com",
+            "tiktok": ".tiktok.com",
         }.get(platform, ".douyin.com")
         for part in raw_cookie.split(";"):
             name, sep, value = part.strip().partition("=")
@@ -2425,7 +2465,8 @@ class TargetUpdate(BaseModel):
 
 @app.post("/api/monitors")
 async def add_monitor(body: TargetIn):
-    platform = body.platform if body.platform in ("douyin", "xhs", "kuaishou", "youtube") else "douyin"
+    platform = body.platform if body.platform in (
+        "douyin", "xhs", "kuaishou", "youtube", "tiktok") else "douyin"
     sec_uid = keyword = xsec_token = ""
     kind = "creator"
     if body.target_kind == "live":
@@ -2452,6 +2493,10 @@ async def add_monitor(body: TargetIn):
         sec_uid = resolve_youtube_channel_ref(body.url_or_secuid)
         if not sec_uid:
             raise HTTPException(400, "无法解析 YouTube 频道,请粘贴频道主页 / @handle / UC 开头的 channel id")
+    elif platform == "tiktok":
+        sec_uid = resolve_tiktok_user_ref(body.url_or_secuid)
+        if not sec_uid:
+            raise HTTPException(400, "无法解析 TikTok 用户,请粘贴主页链接 / @handle")
     else:
         sec_uid = await resolve_sec_uid(body.url_or_secuid, cfg.engine.user_agent)
         if not sec_uid:
@@ -2480,6 +2525,14 @@ async def add_monitor(body: TargetIn):
             if (not monitor_acc or monitor_acc.platform != "youtube"
                     or not (monitor_acc.storage_state or monitor_acc.cookie)):
                 raise HTTPException(400, "所选 YouTube 账号不存在或缺少 Cookie 登录态")
+        elif platform == "tiktok":
+            if not body.account_id:
+                raise HTTPException(
+                    400, "TikTok 监控必须选择已登录账号(Cookie),否则易被风控拦截")
+            monitor_acc = s.get(DouyinAccount, body.account_id)
+            if (not monitor_acc or monitor_acc.platform != "tiktok"
+                    or not (monitor_acc.storage_state or monitor_acc.cookie)):
+                raise HTTPException(400, "所选 TikTok 账号不存在或缺少 Cookie 登录态")
         elif body.account_id:
             monitor_acc = s.get(DouyinAccount, body.account_id)
             if not monitor_acc or monitor_acc.platform != platform:
@@ -3294,20 +3347,22 @@ async def add_publish(body: PublishIn):
         raise HTTPException(400, "没有可用的媒体文件,请先上传")
     with get_session() as s:
         acc = s.get(DouyinAccount, body.account_id)
-        if not acc or acc.platform not in ("xhs", "kuaishou", "douyin", "shipinhao", "youtube"):
-            raise HTTPException(400, "请选择一个已登录的抖音 / 小红书 / 快手 / 视频号 / YouTube 账号")
+        if not acc or acc.platform not in (
+                "xhs", "kuaishou", "douyin", "shipinhao", "youtube", "tiktok"):
+            raise HTTPException(400, "请选择一个已登录的抖音 / 小红书 / 快手 / 视频号 / YouTube / TikTok 账号")
         pname = {"kuaishou": "快手", "douyin": "抖音",
-                 "shipinhao": "视频号", "youtube": "YouTube"}.get(acc.platform, "小红书")
-        if acc.platform == "youtube" and body.media_type != "video":
-            raise HTTPException(400, "YouTube 目前仅支持上传视频")
-        if acc.platform in ("kuaishou", "douyin", "shipinhao", "youtube"):
-            # 抖音 / 快手 / 视频号 / YouTube 发布走浏览器自动化,登录态在该账号持久 profile 里
+                 "shipinhao": "视频号", "youtube": "YouTube",
+                 "tiktok": "TikTok"}.get(acc.platform, "小红书")
+        if acc.platform in ("youtube", "tiktok") and body.media_type != "video":
+            raise HTTPException(400, f"{pname} 目前仅支持上传视频")
+        if acc.platform in ("kuaishou", "douyin", "shipinhao", "youtube", "tiktok"):
+            # 浏览器自动化发布,登录态在该账号持久 profile 里
             if not (acc.creator_storage_state or acc.storage_state):
                 raise HTTPException(400, f"该{pname}账号不可发布:请先在账号页完成登录")
         elif not (acc.creator_storage_state or has_creator_cookies(acc.storage_state)):
             raise HTTPException(400, "该账号不可发布:请对该号完成「小红书扫码登录」或「创作者登录」")
         vis = body.visibility if body.visibility in ("public", "friends", "private") else "public"
-        title_cap = 100 if acc.platform == "youtube" else 20
+        title_cap = 150 if acc.platform == "tiktok" else (100 if acc.platform == "youtube" else 20)
         t = PublishTask(
             platform=acc.platform, account_id=body.account_id, media_type=body.media_type,
             title=body.title.strip()[:title_cap], desc=body.desc, topics=body.topics,
@@ -3510,7 +3565,8 @@ class RepostIn(BaseModel):
 
 
 _REPOST_PF_NAME = {
-    "xhs": "小红书", "douyin": "抖音", "shipinhao": "视频号", "youtube": "YouTube",
+    "xhs": "小红书", "douyin": "抖音", "shipinhao": "视频号",
+    "youtube": "YouTube", "tiktok": "TikTok",
 }
 
 
@@ -3527,18 +3583,19 @@ async def _repost_content(cid: int, body: RepostIn, target_platform: str):
             raise HTTPException(404, "作品不存在")
         if rec.download_status != "done":
             raise HTTPException(400, "该作品尚未下载完成,无法转发")
-        if target_platform == "youtube" and rec.media_type != "video":
-            raise HTTPException(400, "YouTube 目前仅支持转发视频(图集请先合成视频)")
+        if target_platform in ("youtube", "tiktok") and rec.media_type != "video":
+            raise HTTPException(400, f"{_REPOST_PF_NAME[target_platform]} 目前仅支持转发视频(图集请先合成视频)")
         acc = s.get(DouyinAccount, body.account_id)
         pname = _REPOST_PF_NAME[target_platform]
         if not acc or acc.platform != target_platform:
             raise HTTPException(400, f"请选择一个已登录的{pname}账号")
-        if target_platform in ("douyin", "shipinhao", "youtube"):
+        if target_platform in ("douyin", "shipinhao", "youtube", "tiktok"):
             # 浏览器自动化发布:有任一持久登录态即可
             if not (acc.creator_storage_state or acc.storage_state):
                 action = {
                     "shipinhao": "视频号登录",
                     "youtube": "YouTube 登录",
+                    "tiktok": "TikTok 登录",
                     "douyin": "创作者登录",
                 }[target_platform]
                 raise HTTPException(400, f"该{pname}账号不可发布:请先在账号页完成「{action}」")
@@ -3586,6 +3643,12 @@ async def repost_to_channels(cid: int, body: RepostIn):
 async def repost_to_youtube(cid: int, body: RepostIn):
     """把一条已下载的视频转成 YouTube Studio 发布任务。"""
     return await _repost_content(cid, body, "youtube")
+
+
+@app.post("/api/contents/{cid}/repost-tiktok")
+async def repost_to_tiktok(cid: int, body: RepostIn):
+    """把一条已下载的视频转成 TikTok Studio 发布任务。"""
+    return await _repost_content(cid, body, "tiktok")
 
 # ─────────── 自动评论(规则 + 任务)───────────
 class CommentRuleIn(BaseModel):

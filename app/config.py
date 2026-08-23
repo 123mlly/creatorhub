@@ -25,6 +25,9 @@ class EngineConfig:
     youtube_idle_keepalive_hours: float = 2.0
     # YouTube 连续 N 次判到 logged_out 才标失效(抗偶发跳登录页误杀),至少 1
     youtube_logout_strikes: int = 2
+    # TikTok 会话同样偏短,单独闲置保活阈值(小时);0=跟 idle_keepalive_hours
+    tiktok_idle_keepalive_hours: float = 2.0
+    tiktok_logout_strikes: int = 2
     # 自有账号评论模式:创作中心评论管理页(实验性,抖音改版时改这里)
     creator_comment_url: str = "https://creator.douyin.com/creator-micro/interaction/comment-management"
     request_timeout_seconds: int = 20
@@ -36,7 +39,7 @@ class EngineConfig:
     )
     # ── 多账号风控隔离 ──
     profiles_dir: str = "./data/profiles"   # 每账号持久化浏览器 profile 根目录
-    max_live_contexts: int = 6              # 同时常驻的浏览器 context 上限(LRU 驱逐,控内存)
+    max_live_contexts: int = 2              # 同时常驻的浏览器 context 上限(LRU 驱逐,控内存)
     active_accounts: int = 3                # 同一时刻最多并发活跃的账号数(错峰)
     scan_jitter: float = 0.15              # 扫描间隔随机抖动比例(±15%),消除整点齐发特征
     route_download_via_proxy: bool = True   # 媒体下载是否走账号代理(避免 CDN 拉流暴露真实 IP)

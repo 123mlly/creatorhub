@@ -47,6 +47,7 @@ from ..platforms.channels import (parse_channels_feed, parse_channels_comment,
                    flatten_channels_comments, parse_self_user as parse_channels_self_user,
                    publish_channels)
 from ..platforms.youtube import publish_youtube
+from ..platforms.tiktok import publish_tiktok
 from ..models import (ContentRecord, CommentRecord, CommentRule, CommentTask,
                       CommentWatch, DouyinAccount, MonitorTarget,
                       NotificationChannel, PublishTask, AccountActionTask,
@@ -221,6 +222,10 @@ class MonitorEngine:
             yt = float(getattr(self.cfg.engine, "youtube_idle_keepalive_hours", 2.0) or 0)
             if yt > 0:
                 return yt
+        if platform == "tiktok":
+            tt = float(getattr(self.cfg.engine, "tiktok_idle_keepalive_hours", 2.0) or 0)
+            if tt > 0:
+                return tt
         return float(self.cfg.engine.idle_keepalive_hours or 0)
 
     async def _verify_proxy_region(self, account_id, proxy: str, timezone_id: str) -> None:
@@ -313,6 +318,15 @@ class MonitorEngine:
                                 refreshed_state = json.dumps(await ctx.storage_state())
                             except Exception:
                                 refreshed_state = ""
+                    elif platform == "tiktok":
+                        from ..platforms.tiktok import fetch_tiktok_self_profile
+                        u, err = await fetch_tiktok_self_profile(self.browser, identity)
+                        if u:
+                            try:
+                                ctx = await self.browser.context_for(identity)
+                                refreshed_state = json.dumps(await ctx.storage_state())
+                            except Exception:
+                                refreshed_state = ""
                     else:
                         u, err = await fetch_self_profile(self.browser, identity)
             except Exception:
@@ -334,6 +348,9 @@ class MonitorEngine:
                     elif platform == "youtube":
                         from ..platforms.youtube import parse_yt_self_user
                         p = parse_yt_self_user(u)
+                    elif platform == "tiktok":
+                        from ..platforms.tiktok import parse_tt_self_user
+                        p = parse_tt_self_user(u)
                     else:
                         p = parse_self_user(u)
                     a.status = "active"
@@ -355,6 +372,9 @@ class MonitorEngine:
                     if platform == "youtube":
                         need = max(1, int(getattr(
                             self.cfg.engine, "youtube_logout_strikes", 2) or 2))
+                    elif platform == "tiktok":
+                        need = max(1, int(getattr(
+                            self.cfg.engine, "tiktok_logout_strikes", 2) or 2))
                     n = self._logout_strikes.get(aid, 0) + 1
                     self._logout_strikes[aid] = n
                     if n < need:
@@ -541,6 +561,8 @@ class MonitorEngine:
             return await self._scan_ks_target_locked(target_id)
         if platform == "youtube":
             return await self._scan_youtube_target_locked(target_id)
+        if platform == "tiktok":
+            return await self._scan_tiktok_target_locked(target_id)
         with get_session() as s:
             target = s.get(MonitorTarget, target_id)
             if not target:
@@ -897,7 +919,8 @@ class MonitorEngine:
         if not channels:
             return
         pf = {"douyin": "抖音", "xhs": "小红书", "kuaishou": "快手",
-              "shipinhao": "视频号", "youtube": "YouTube"}.get(platform, platform)
+              "shipinhao": "视频号", "youtube": "YouTube",
+              "tiktok": "TikTok"}.get(platform, platform)
         name = (nickname or f"#{account_id}").strip()
         try:
             await notify_all(
@@ -1053,6 +1076,121 @@ class MonitorEngine:
                         t.avatar = author["avatar"]
                 s.add(t)
                 target_name = t.nickname or (channel_ref[:24] if channel_ref else "youtube")
+            s.commit()
+            for rec, _ in new_records:
+                s.refresh(rec)
+
+        if new_records and not first_scan:
+            await self._notify_new(target_name, [aw for _, aw in new_records])
+
+        await asyncio.gather(*(self._download(rec.id, aw, base_dir, proxy, state_json=state)
+                               for rec, aw in new_records))
+        return {"ok": not error, "new": len(new_records), "error": error}
+
+    async def _scan_tiktok_target_locked(self, target_id: int) -> dict:
+        """TikTok 用户监控:yt-dlp 拉最近作品并入库下载。"""
+        from ..platforms.tiktok import (
+            fetch_tiktok_videos, parse_tt_entry,
+        )
+        with get_session() as s:
+            target = s.get(MonitorTarget, target_id)
+            if not target:
+                return {"ok": False, "error": "target not found"}
+            first_scan = target.last_scan_at is None
+            user_ref = target.sec_uid
+            if not user_ref:
+                return self._mark_target_skip(target_id, "缺少 TikTok 用户标识")
+            state = ""
+            proxy = ""
+            if target.account_id:
+                acc = s.get(DouyinAccount, target.account_id)
+                if acc:
+                    if self._proxy_bad(acc):
+                        return self._mark_target_skip(
+                            target_id, "账号代理标记为不可用(proxy bad),已跳过以免暴露真实 IP")
+                    state = acc.storage_state or ""
+                    proxy = acc.proxy or ""
+            known = set(s.exec(
+                select(ContentRecord.aweme_id)
+                .where(ContentRecord.target_id == target_id)).all())
+            base_dir = target.download_dir or get_setting(
+                "download_dir", self.cfg.engine.media_dir)
+            quality = target.video_quality or get_setting("video_quality", "highest")
+            backfill = target.initial_backfill_count
+            if first_scan:
+                limit = 50 if backfill < 0 else max(0, min(backfill or 0, 50))
+                if limit == 0:
+                    entries, author, error = await fetch_tiktok_videos(
+                        user_ref, known_ids=set(), limit=1, proxy=proxy,
+                        state_json=state, user_agent=self.cfg.engine.user_agent)
+                    with get_session() as s2:
+                        t = s2.get(MonitorTarget, target_id)
+                        if t:
+                            t.last_scan_at = datetime.utcnow()
+                            t.last_error = error or ""
+                            if author:
+                                if author.get("nickname") and not t.nickname:
+                                    t.nickname = author["nickname"]
+                                if author.get("avatar") and not t.avatar:
+                                    t.avatar = author["avatar"]
+                            for e in entries:
+                                aw = parse_tt_entry(e, quality=quality)
+                                if aw:
+                                    s2.add(ContentRecord(
+                                        platform="tiktok", target_id=target_id,
+                                        aweme_id=aw.aweme_id, desc=aw.desc,
+                                        media_type=aw.media_type, quality=aw.quality_label,
+                                        create_time=aw.create_time, cover_url=aw.cover or "",
+                                        like_count=aw.like_count, comment_count=aw.comment_count,
+                                        duration=aw.duration,
+                                        media_json=json.dumps([{"url": m.url, "kind": m.kind,
+                                                                "ext": m.ext, "index": m.index}
+                                                               for m in aw.medias]),
+                                        download_status="skipped",
+                                    ))
+                            s2.add(t); s2.commit()
+                    return {"ok": not error, "new": 0, "error": error, "baseline": True}
+            else:
+                limit = 30
+
+        entries, author, error = await fetch_tiktok_videos(
+            user_ref, known_ids=known, limit=limit, proxy=proxy,
+            state_json=state, user_agent=self.cfg.engine.user_agent)
+
+        new_records = []
+        seen = set()
+        for item in entries:
+            aw = parse_tt_entry(item, quality=quality)
+            if not aw or aw.aweme_id in seen or aw.aweme_id in known:
+                continue
+            seen.add(aw.aweme_id)
+            media_json = json.dumps([{"url": m.url, "kind": m.kind, "ext": m.ext,
+                                      "index": m.index} for m in aw.medias])
+            rec = ContentRecord(
+                platform="tiktok", target_id=target_id, aweme_id=aw.aweme_id,
+                desc=aw.desc, media_type=aw.media_type, quality=aw.quality_label,
+                create_time=aw.create_time, cover_url=aw.cover or "",
+                like_count=aw.like_count, comment_count=aw.comment_count,
+                duration=aw.duration, media_json=media_json,
+                download_status="pending",
+            )
+            new_records.append((rec, aw))
+
+        target_name = ""
+        with get_session() as s:
+            for rec, _ in new_records:
+                s.add(rec)
+            t = s.get(MonitorTarget, target_id)
+            if t:
+                t.last_scan_at = datetime.utcnow()
+                t.last_error = error or ""
+                if author:
+                    if author.get("nickname") and not t.nickname:
+                        t.nickname = author["nickname"]
+                    if author.get("avatar") and not t.avatar:
+                        t.avatar = author["avatar"]
+                s.add(t)
+                target_name = t.nickname or (user_ref[:24] if user_ref else "tiktok")
             s.commit()
             for rec, _ in new_records:
                 s.refresh(rec)
@@ -1678,10 +1816,10 @@ class MonitorEngine:
                           if isinstance(i, int) and 0 <= i < len(files)]
                 if picked:
                     files = picked
-            if target_platform == "youtube" and rec.media_type != "video":
+            if target_platform in ("youtube", "tiktok") and rec.media_type != "video":
                 return None
-            title_cap = {"douyin": 30, "shipinhao": 16, "youtube": 100}.get(
-                target_platform, 20)
+            title_cap = {"douyin": 30, "shipinhao": 16, "youtube": 100,
+                         "tiktok": 150}.get(target_platform, 20)
             t_title = (title if title is not None else (rec.desc or ""))[:title_cap]
             t_desc = desc if desc is not None else (rec.desc or "")
             t_topics = topics if topics is not None else ""
@@ -1770,6 +1908,18 @@ class MonitorEngine:
             except Exception as e:
                 ok, url, err = False, "", f"发布异常: {e!r}"
             return await self._finish_publish(task_id, ok, url, err, platform="youtube")
+
+        if platform == "tiktok":
+            if not state:
+                return await self._finish_publish(
+                    task_id, False, "", "该账号未完成 TikTok 登录,请先在账号页登录")
+            try:
+                ok, url, err = await publish_tiktok(self.browser, identity, state,
+                                                    media_type, title, desc, files,
+                                                    topics=topics, headed=True)
+            except Exception as e:
+                ok, url, err = False, "", f"发布异常: {e!r}"
+            return await self._finish_publish(task_id, ok, url, err, platform="tiktok")
 
         if platform == "shipinhao":
             # 视频号发布:登录态在该账号持久 profile 里,走浏览器自动化(wujie shadowRoot)
@@ -2585,6 +2735,19 @@ class MonitorEngine:
                     user_agent=self.cfg.engine.user_agent,
                     quality=getattr(aweme, "quality_label", "") or "highest",
                 )
+            elif getattr(aweme, "platform", "") == "tiktok":
+                from ..platforms.tiktok import download_tiktok_video, safe_title
+                watch = aweme.medias[0].url if aweme.medias else ""
+                out_dir = self.downloader._target_dir(aweme.author_name, base_dir)
+                stem = f"{aweme.aweme_id}_{safe_title(aweme.desc) or aweme.aweme_id}"
+                ok, path, err = await download_tiktok_video(
+                    watch, str(out_dir),
+                    filename_stem=stem,
+                    proxy=self._dl_proxy(proxy),
+                    state_json=state_json,
+                    user_agent=self.cfg.engine.user_agent,
+                    quality=getattr(aweme, "quality_label", "") or "highest",
+                )
             else:
                 ok, path, err = await self.downloader.download_aweme(
                     aweme, base_dir, self._dl_proxy(proxy))
@@ -2696,6 +2859,22 @@ class MonitorEngine:
                 rec_q = s.get(ContentRecord, record_id)
                 qlabel = (rec_q.quality if rec_q else "") or "highest"
             ok, path, err = await download_youtube_video(
+                watch, str(out_dir),
+                filename_stem=stem,
+                proxy=self._dl_proxy(acc_proxy),
+                state_json=acc_state,
+                user_agent=self.cfg.engine.user_agent,
+                quality=qlabel,
+            )
+        elif platform == "tiktok":
+            from ..platforms.tiktok import download_tiktok_video, safe_title
+            watch = aw.medias[0].url if aw.medias else ""
+            out_dir = self.downloader._target_dir(author_name, base_dir)
+            stem = f"{aw.aweme_id}_{safe_title(aw.desc) or aw.aweme_id}"
+            with get_session() as s:
+                rec_q = s.get(ContentRecord, record_id)
+                qlabel = (rec_q.quality if rec_q else "") or "highest"
+            ok, path, err = await download_tiktok_video(
                 watch, str(out_dir),
                 filename_stem=stem,
                 proxy=self._dl_proxy(acc_proxy),
