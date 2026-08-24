@@ -1834,7 +1834,24 @@ class MonitorEngine:
             s.add(task); s.commit(); s.refresh(task)
             return task.id
 
+    def _recover_stale_publish(self) -> None:
+        """进程重启或窗口被关后,publishing 会残留且无法点「立即发布」。"""
+        with get_session() as s:
+            rows = s.exec(select(PublishTask)
+                          .where(PublishTask.status == "publishing")).all()
+            n = 0
+            for t in rows:
+                if t.id in self._publishing:
+                    continue
+                t.status = "failed"
+                t.error = t.error or "发布中断(窗口被关或进程重启),请点立即发布重试"
+                s.add(t)
+                n += 1
+            if n:
+                s.commit()
+
     async def _process_publish(self):
+        self._recover_stale_publish()
         due = []
         now = datetime.utcnow()
         with get_session() as s:
@@ -1866,8 +1883,11 @@ class MonitorEngine:
             t = s.get(PublishTask, task_id)
             if not t:
                 return {"ok": False, "error": "任务不存在"}
-            if t.status in ("done", "publishing"):
-                return {"ok": False, "error": f"任务状态为 {t.status}"}
+            if t.status == "done":
+                return {"ok": False, "error": "任务已发布"}
+            if t.status == "canceled":
+                return {"ok": False, "error": "任务已取消"}
+            # publishing 残留(上次窗口被关/进程重启)允许重试;真正进行中的会被 _publishing 挡住
             state = ""
             identity = self.browser.anon_identity()
             if t.account_id:
@@ -1977,7 +1997,8 @@ class MonitorEngine:
                     channels = [{"type": c.type, "config": _loads(c.config)} for c in chans]
                 if channels:
                     pname = {"kuaishou": "快手", "douyin": "抖音",
-                             "shipinhao": "视频号"}.get(platform, "小红书")
+                             "shipinhao": "视频号", "youtube": "YouTube",
+                             "tiktok": "TikTok"}.get(platform, "小红书")
                     await notify_all(channels, f"{pname}发布成功", url or "已发布一条作品")
             except Exception:
                 pass

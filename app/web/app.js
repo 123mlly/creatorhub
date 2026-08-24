@@ -466,7 +466,7 @@ function applyPlatformUI() {
     : yt
     ? "发布通过自动化 YouTube Studio(studio.youtube.com)完成,会弹出浏览器窗口。仅支持视频;上传后需走完详情→可见性步骤并点 Publish。遇验证码/频道未创建/需补缩略图请在窗口里手动处理(建议发布时在场)。⚠️ Studio 改版可能导致选择器失效。"
     : tt
-    ? "发布通过自动化 TikTok Studio(tiktok.com/tiktokstudio/upload)完成,会弹出浏览器窗口。仅支持视频;遇验证码/需补封面请在窗口里手动处理(建议发布时在场)。⚠️ Studio 改版可能导致选择器失效。"
+    ? "发布通过自动化 TikTok Studio(tiktok.com/tiktokstudio/upload)完成,会弹出浏览器窗口。仅支持视频。标题和正文都会写入 Studio 文案(请两个都改成英文,不要只改标题)。请不要关窗口,等右下角 Post / 发布亮起(不要点侧栏 Posts)。画面上的中文字是原视频自带的,不会被翻译。"
     : "发布通过自动化小红书创作平台完成,会弹出浏览器窗口;若遇验证码/需补封面可在窗口里手动处理。定时任务由后台引擎到点执行。";
   // YouTube / TikTok 仅视频
   if ((yt || tt) && $("pub-type")) {
@@ -3499,7 +3499,7 @@ async function openRepost(id, target) {
   $("rp-topics").value = "";
   $("rp-when").value = ""; dtSyncAll();
   $("rp-msg").textContent = isYt ? "将通过 YouTube Studio 上传(仅视频)"
-    : isTt ? "将通过 TikTok Studio 上传(仅视频)" : "";
+    : isTt ? "将通过 TikTok Studio 上传(仅视频)。标题和正文都会进视频文案,要发英文请两处都改。" : "";
   $("rp-src").textContent = rec ? `来源:${rec.media_type === "images" ? "图集" : "视频"} · ${esc((rec.desc || "(无描述)").slice(0, 30))}` : "";
   // 抖音发布设置(可见性 / 保存权限)仅目标为抖音时显示
   if ($("rp-dy-opts")) $("rp-dy-opts").style.display = isDy ? "flex" : "none";
