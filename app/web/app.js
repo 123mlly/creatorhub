@@ -2394,6 +2394,7 @@ async function refreshShareHistory() {
         <td style="white-space:normal;max-width:300px"><code style="overflow-wrap:anywhere">${esc(path || "—")}</code></td>
         <td>
           <div class="row" style="gap:6px;flex-wrap:nowrap">
+            ${row.status === "done" ? `<button class="ghost sm content-action-primary" onclick="pickShareRepostTarget(${Number(row.id)}, '${esc(row.platform || "")}', '${esc(row.media_type || "")}')">${ic("i-send")}转发</button>` : ""}
             ${path ? `<button class="ghost sm" data-path="${esc(path)}" onclick="copySharePath(this)">复制路径</button>` : ""}
             <button class="ghost sm danger" onclick="deleteShareHistory(${Number(row.id)})">删除记录</button>
           </div>
@@ -3429,8 +3430,21 @@ async function _pickXhsAccount(withOff) {
   return +v;
 }
 let REPOST_ID = null;
+let REPOST_SOURCE = "content";       // content | share
 let REPOST_TARGET = "xhs";           // xhs / douyin / shipinhao / youtube / tiktok
 const REPOST_PF_NAME = { xhs: "小红书", douyin: "抖音", shipinhao: "视频号", youtube: "YouTube", tiktok: "TikTok" };
+function repostTargetOptions(sourcePlatform, mediaType) {
+  const options = [];
+  if (sourcePlatform !== "xhs") options.push({ value: "xhs", label: "小红书" });
+  if (sourcePlatform !== "shipinhao") options.push({ value: "shipinhao", label: "视频号" });
+  if (sourcePlatform === "xhs") options.push({ value: "douyin", label: "抖音" });
+  const isVideo = mediaType === "video";
+  if (!mediaType || isVideo) {
+    options.push({ value: "youtube", label: "YouTube" });
+    options.push({ value: "tiktok", label: "TikTok" });
+  }
+  return options;
+}
 const repostXhs = (id) => openRepost(id, "xhs");
 const repostDouyin = (id) => openRepost(id, "douyin");
 const repostChannels = (id) => openRepost(id, "shipinhao");
@@ -3438,15 +3452,7 @@ const repostYoutube = (id) => openRepost(id, "youtube");
 const repostTiktok = (id) => openRepost(id, "tiktok");
 async function pickRepostTarget(id) {
   const rec = CONTENTS.find(r => r.id === id);
-  const options = [];
-  if (PLATFORM !== "xhs") options.push({ value: "xhs", label: "小红书" });
-  if (PLATFORM !== "shipinhao") options.push({ value: "shipinhao", label: "视频号" });
-  if (PLATFORM === "xhs") options.push({ value: "douyin", label: "抖音" });
-  // YouTube / TikTok Studio 仅支持视频
-  if (!rec || rec.media_type === "video") {
-    options.push({ value: "youtube", label: "YouTube" });
-    options.push({ value: "tiktok", label: "TikTok" });
-  }
+  const options = repostTargetOptions(PLATFORM, rec && rec.media_type);
   if (!options.length) { toast("当前作品没有可转发的目标平台", "err"); return; }
   const target = await uiSelect({
     title: "转发作品",
@@ -3457,6 +3463,19 @@ async function pickRepostTarget(id) {
   });
   if (target === null) return;
   openRepost(id, target);
+}
+async function pickShareRepostTarget(historyId, sourcePlatform, mediaType) {
+  const options = repostTargetOptions(sourcePlatform, mediaType);
+  if (!options.length) { toast("当前作品没有可转发的目标平台", "err"); return; }
+  const target = await uiSelect({
+    title: "转发作品",
+    hint: "选择要发布到的平台，下一步可以继续编辑标题、文案和发布时间。"
+      + (mediaType && mediaType !== "video" ? "（图集不可转发到 YouTube / TikTok）" : ""),
+    options,
+    value: options[0].value,
+  });
+  if (target === null) return;
+  openShareRepost(historyId, target, sourcePlatform, mediaType);
 }
 async function openRepost(id, target) {
   const rec = CONTENTS.find(r => r.id === id);
@@ -3480,6 +3499,7 @@ async function openRepost(id, target) {
     toast(loginHint, "err");
     return;
   }
+  REPOST_SOURCE = "content";
   REPOST_ID = id; REPOST_TARGET = target;
   const isDy = target === "douyin";
   const isChannels = target === "shipinhao";
@@ -3509,6 +3529,64 @@ async function openRepost(id, target) {
   $("repost").style.display = "flex";
   $("rp-title").focus();
 }
+async function openShareRepost(historyId, target, sourcePlatform, mediaType) {
+  if ((target === "youtube" || target === "tiktok") && mediaType && mediaType !== "video") {
+    toast((target === "tiktok" ? "TikTok" : "YouTube") + " 目前仅支持转发视频", "err");
+    return;
+  }
+  const all = await api("/api/accounts?platform=" + target);
+  const accs = target === "xhs"
+    ? all.filter(a => a.has_creator)
+    : all.filter(a => a.has_storage || a.has_creator);
+  if (!accs.length) {
+    const loginHint = {
+      xhs: "请先在小红书账号页完成「创作者登录」(发布用)",
+      shipinhao: "请先在视频号账号页完成「视频号登录」",
+      youtube: "请先在 YouTube 账号页完成「YouTube 登录」或 Cookie 粘贴",
+      tiktok: "请先在 TikTok 账号页完成「TikTok 登录」或 Cookie 粘贴",
+      douyin: "请先在抖音账号页完成登录(扫码/创作者/Cookie)",
+    }[target] || "请先添加并登录目标平台账号";
+    toast(loginHint, "err");
+    return;
+  }
+  let mediaInfo = null;
+  try {
+    mediaInfo = await api("/api/share-download/history/" + historyId + "/media");
+  } catch (e) {
+    toast("读取本地媒体失败:" + e.message, "err");
+    return;
+  }
+  REPOST_SOURCE = "share";
+  REPOST_ID = historyId;
+  REPOST_TARGET = target;
+  const isDy = target === "douyin";
+  const isChannels = target === "shipinhao";
+  const isYt = target === "youtube";
+  const isTt = target === "tiktok";
+  const cap = isTt ? 150 : isYt ? 100 : isDy ? 30 : isChannels ? 16 : 20;
+  const pname = REPOST_PF_NAME[target] || "小红书";
+  const desc = (mediaInfo && mediaInfo.desc) || "";
+  $("rp-head").textContent = "发" + pname + " · 编辑后推送";
+  $("rp-title-label").textContent = `标题(≤${cap} 字)`;
+  $("rp-title").maxLength = cap;
+  $("rp-title").placeholder = target === "xhs" ? "给笔记起个标题"
+    : (isYt || isTt) ? "给视频起个标题" : "给作品起个标题";
+  $("rp-acc").innerHTML = accs.map(a => `<option value="${a.id}">${esc(a.nickname)}</option>`).join("");
+  $("rp-title").value = desc.slice(0, cap);
+  $("rp-desc").value = desc;
+  $("rp-topics").value = "";
+  $("rp-when").value = ""; dtSyncAll();
+  $("rp-msg").textContent = isYt ? "将通过 YouTube Studio 上传(仅视频)"
+    : isTt ? "将通过 TikTok Studio 上传(仅视频)。标题和正文都会进视频文案,要发英文请两处都改。" : "";
+  const srcPf = PF_NAME[sourcePlatform] || sourcePlatform || "链接下载";
+  $("rp-src").textContent = `来源:${srcPf} · ${mediaInfo.media_type === "images" ? "图集" : "视频"} · ${esc(desc.slice(0, 30) || "(无描述)")}`;
+  if ($("rp-dy-opts")) $("rp-dy-opts").style.display = isDy ? "flex" : "none";
+  if (isDy) { if ($("rp-visibility")) $("rp-visibility").value = "public"; if ($("rp-allowsave")) $("rp-allowsave").value = "1"; }
+  renderRepostThumbs(historyId);
+  $("rp-submit").disabled = false;
+  $("repost").style.display = "flex";
+  $("rp-title").focus();
+}
 let RP_MEDIA = [];         // 可编辑图集:[{url, idx}](idx=原始序号,提交时回传)
 let RP_MEDIA_LEN = 0;      // 原始图片总数(判断是否被编辑过)
 let RP_IS_VIDEO = false;
@@ -3533,14 +3611,29 @@ async function renderRepostThumbs(id) {
   const box = $("rp-thumbs"); if (!box) return;
   RP_MEDIA = []; RP_MEDIA_LEN = 0; RP_IS_VIDEO = false;
   box.style.display = "none"; box.innerHTML = "";
+  const mediaUrl = REPOST_SOURCE === "share"
+    ? "/api/share-download/history/" + id + "/media"
+    : "/api/contents/" + id + "/media";
   try {
-    const d = await api("/api/contents/" + id + "/media");
+    const d = await api(mediaUrl);
     if (REPOST_ID !== id) return;   // 弹窗已切换/关闭
     const vid = (d.medias || []).find(m => m.kind === "video");
     const isVideo = d.media_type === "video" || d.media_type === "live";
     if (isVideo && (d.local_url || vid)) {
       RP_IS_VIDEO = true;
-      box.innerHTML = rpVideoThumbHtml(id, d.cover_url, d.local_url);
+      if (REPOST_SOURCE === "share") {
+        const thumb = (d.cover_url || "").trim() || d.local_url || (vid && vid.url) || "";
+        const localUrl = d.local_url || (vid && vid.url) || "";
+        box.innerHTML = thumb
+          ? `<div class="rp-th rp-th-video" title="点击预览视频">
+              <img src="${esc(thumb)}" alt="封面" referrerpolicy="no-referrer" loading="lazy"
+                   onclick="window.open('${esc(localUrl)}','_blank')">
+              <span class="rp-th-badge cover">视频</span>
+            </div>`
+          : `<div class="rp-th-ph" title="本地视频">${ic("i-play")}</div>`;
+      } else {
+        box.innerHTML = rpVideoThumbHtml(id, d.cover_url, d.local_url);
+      }
       box.style.display = "flex";
       return;
     }
@@ -3559,7 +3652,7 @@ function rpDrawThumbs() {
     <div class="rp-th" draggable="true" data-pos="${pos}"
          ondragstart="rpDragStart(${pos},event)" ondragover="rpDragOver(${pos},event)"
          ondragleave="rpDragLeave(event)" ondrop="rpDrop(${pos},event)" ondragend="rpDragEnd()">
-      <img src="${esc(m.url)}" referrerpolicy="no-referrer" draggable="false" alt="" title="点击看大图" onclick="openPreview(${REPOST_ID},${m.idx})">
+      <img src="${esc(m.url)}" referrerpolicy="no-referrer" draggable="false" alt="" title="点击看大图" onclick="${REPOST_SOURCE === "share" ? `window.open('${esc(m.url)}','_blank')` : `openPreview(${REPOST_ID},${m.idx})`}">
       <span class="rp-th-badge${pos === 0 ? " cover" : ""}">${pos === 0 ? "封面" : pos + 1}</span>
       <button type="button" class="rp-th-x" title="移除这张" onclick="rpImgRemove(${pos})">✕</button>
       <div class="rp-th-mv">
@@ -3609,7 +3702,7 @@ function rpMediaOrder() {
   const unchanged = order.length === RP_MEDIA_LEN && order.every((v, i) => v === i);
   return unchanged ? null : order;
 }
-function hideRepost() { $("repost").style.display = "none"; REPOST_ID = null; }
+function hideRepost() { $("repost").style.display = "none"; REPOST_ID = null; REPOST_SOURCE = "content"; }
 async function submitRepost() {
   if (REPOST_ID === null) return;
   const accId = +$("rp-acc").value;
@@ -3635,8 +3728,11 @@ async function submitRepost() {
     media_order: rpMediaOrder(),
   };
   const pname = REPOST_PF_NAME[REPOST_TARGET] || "小红书";
+  const apiPath = REPOST_SOURCE === "share"
+    ? "/api/share-download/history/" + REPOST_ID + "/repost-" + REPOST_TARGET
+    : "/api/contents/" + REPOST_ID + "/repost-" + REPOST_TARGET;
   try {
-    const r = await api("/api/contents/" + REPOST_ID + "/repost-" + REPOST_TARGET, {
+    const r = await api(apiPath, {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
     });
     toast((body.scheduled_at ? "已加入定时发布队列" : `已加入${pname}发布队列`) + "(任务 #" + r.task_id + ")", "ok");

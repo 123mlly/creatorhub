@@ -206,6 +206,32 @@ class MonitorEngine:
                 a.last_active_at = datetime.utcnow()
                 s.add(a); s.commit()
 
+    async def _dump_storage_state(self, identity) -> str:
+        """从常驻 Chromium profile 导出 storage_state JSON(失败返回空串)。"""
+        try:
+            ctx = await self.browser.context_for(identity)
+            return json.dumps(await ctx.storage_state())
+        except Exception:
+            return ""
+
+    async def _persist_identity_cookies(self, account_id, identity,
+                                        *, also_creator: bool = False) -> None:
+        """浏览器刚用过:把 Cookie 写回 DB,避免库内 storage_state 快照过期(ttwid 等)。"""
+        if not account_id:
+            return
+        state_json = await self._dump_storage_state(identity)
+        if not state_json:
+            return
+        with get_session() as s:
+            a = s.get(DouyinAccount, account_id)
+            if not a:
+                return
+            a.storage_state = state_json
+            if also_creator:
+                a.creator_storage_state = state_json
+            s.add(a)
+            s.commit()
+
     def _keepalive_due(self, last_active_at, hours: float | None = None) -> bool:
         """闲置判定:从未活跃、或距上次活跃超过阈值(带 ±jitter 错峰)才需保活。
         hours<=0 时退回旧行为(每轮都摸)。"""
@@ -313,22 +339,17 @@ class MonitorEngine:
                         u, err = await fetch_youtube_self_profile(self.browser, identity)
                         # 保活成功后把刷新过的 Cookie 写回 DB,避免只剩磁盘 profile
                         if u:
-                            try:
-                                ctx = await self.browser.context_for(identity)
-                                refreshed_state = json.dumps(await ctx.storage_state())
-                            except Exception:
-                                refreshed_state = ""
+                            refreshed_state = await self._dump_storage_state(identity)
                     elif platform == "tiktok":
                         from ..platforms.tiktok import fetch_tiktok_self_profile
                         u, err = await fetch_tiktok_self_profile(self.browser, identity)
                         if u:
-                            try:
-                                ctx = await self.browser.context_for(identity)
-                                refreshed_state = json.dumps(await ctx.storage_state())
-                            except Exception:
-                                refreshed_state = ""
+                            refreshed_state = await self._dump_storage_state(identity)
                     else:
+                        # 抖音:浏览器摸活后同样回写,否则库内 Cookie(ttwid)会停在上次扫码
                         u, err = await fetch_self_profile(self.browser, identity)
+                        if u:
+                            refreshed_state = await self._dump_storage_state(identity)
             except Exception:
                 continue
             became_invalid = False
@@ -364,7 +385,11 @@ class MonitorEngine:
                     a.aweme_count = p.get("aweme_count") or a.aweme_count
                     if refreshed_state:
                         a.storage_state = refreshed_state
-                        a.creator_storage_state = refreshed_state
+                        # YouTube/TikTok 读写共用一份;抖音创作中心可能另有快照,只更新读取态
+                        if platform in ("youtube", "tiktok"):
+                            a.creator_storage_state = refreshed_state
+                        elif platform == "douyin" and not a.creator_storage_state:
+                            a.creator_storage_state = refreshed_state
                     self._logout_strikes.pop(aid, None)
                     got_profile = True
                 elif err == "logged_out":
@@ -578,6 +603,7 @@ class MonitorEngine:
             if self._proxy_bad(acc):
                 return self._mark_target_skip(
                     target_id, "账号代理标记为不可用(proxy bad),已跳过以免暴露真实 IP")
+            account_id = target.account_id
             identity, proxy = self._identity_proxy(acc)
             # 只取 aweme_id 列,避免把整行作品都加载进内存
             known = set(s.exec(
@@ -601,6 +627,8 @@ class MonitorEngine:
             block_media=self.cfg.engine.block_media_resources,
             # 默认只监控订阅后的作品；显式首次回填时允许继续向历史翻页。
             stop_before=(0 if first_scan and backfill_count != 0 else scan_since))
+        # 浏览器已访问抖音:把刷新后的 Cookie 写回库,供直连/yt-dlp 复用
+        await self._persist_identity_cookies(account_id, identity)
 
         new_records = []
         selected = _select_douyin_awemes(
@@ -1499,6 +1527,7 @@ class MonitorEngine:
             state = creator_state = proxy = ""
             identity = self.browser.anon_identity()
             has_creator = False
+            account_id = w.account_id
             if w.account_id:
                 acc = s.get(DouyinAccount, w.account_id)
                 if acc:
@@ -1553,6 +1582,9 @@ class MonitorEngine:
         except Exception as e:
             error = repr(e)
             log.warning("评论监控 %s 失败: %s", watch_id, e)
+
+        if platform == "douyin" and account_id:
+            await self._persist_identity_cookies(account_id, identity)
 
         with get_session() as s:
             w = s.get(CommentWatch, watch_id)
@@ -1789,6 +1821,52 @@ class MonitorEngine:
                  if f.is_file() and not f.name.endswith(".part")]
         return [str(f) for f in sorted(cands, key=_idx_key)]
 
+    def create_files_relay_publish(
+        self,
+        files: list[str],
+        *,
+        source_platform: str,
+        account_id: int,
+        target_platform: str = "xhs",
+        media_type: str = "video",
+        default_title: str = "",
+        default_desc: str = "",
+        source_content_id: Optional[int] = None,
+        title: Optional[str] = None,
+        desc: Optional[str] = None,
+        topics: Optional[str] = None,
+        visibility: str = "public",
+        allow_save: bool = True,
+        media_order: Optional[list] = None,
+    ) -> Optional[int]:
+        """从本地文件列表创建跨平台发布任务(链接下载历史等场景)。"""
+        if not files:
+            return None
+        if media_order:
+            picked = [files[i] for i in media_order
+                      if isinstance(i, int) and 0 <= i < len(files)]
+            if picked:
+                files = picked
+        if target_platform in ("youtube", "tiktok") and media_type != "video":
+            return None
+        title_cap = {"douyin": 30, "shipinhao": 16, "youtube": 100,
+                     "tiktok": 150}.get(target_platform, 20)
+        t_title = (title if title is not None else default_title)[:title_cap]
+        t_desc = desc if desc is not None else default_desc
+        t_topics = topics if topics is not None else ""
+        with get_session() as s:
+            task = PublishTask(
+                platform=target_platform, account_id=account_id,
+                media_type="video" if media_type == "video" else "images",
+                title=t_title, desc=t_desc, topics=t_topics,
+                visibility=visibility, allow_save=allow_save,
+                media_json=json.dumps(files),
+                source_platform=source_platform,
+                source_content_id=source_content_id,
+            )
+            s.add(task); s.commit(); s.refresh(task)
+            return task.id
+
     def create_relay_publish(self, content_id: int, account_id: int,
                              target_platform: str = "xhs",
                              title: Optional[str] = None, desc: Optional[str] = None,
@@ -1809,30 +1887,19 @@ class MonitorEngine:
             files = self._content_files(rec)
             if not files:
                 return None
-            # 转发前若在弹窗里剔除/调序了图片,media_order 是保留下来的原始序号(按新顺序)。
-            # 按它过滤+重排本地文件(首个=封面);越界序号忽略,全无效则回退全部原序。
-            if media_order:
-                picked = [files[i] for i in media_order
-                          if isinstance(i, int) and 0 <= i < len(files)]
-                if picked:
-                    files = picked
-            if target_platform in ("youtube", "tiktok") and rec.media_type != "video":
-                return None
-            title_cap = {"douyin": 30, "shipinhao": 16, "youtube": 100,
-                         "tiktok": 150}.get(target_platform, 20)
-            t_title = (title if title is not None else (rec.desc or ""))[:title_cap]
-            t_desc = desc if desc is not None else (rec.desc or "")
-            t_topics = topics if topics is not None else ""
-            task = PublishTask(
-                platform=target_platform, account_id=account_id,
-                media_type="video" if rec.media_type == "video" else "images",
-                title=t_title, desc=t_desc, topics=t_topics,
+            return self.create_files_relay_publish(
+                files,
+                source_platform=rec.platform,
+                source_content_id=rec.id,
+                account_id=account_id,
+                target_platform=target_platform,
+                media_type=rec.media_type,
+                default_title=rec.desc or "",
+                default_desc=rec.desc or "",
+                title=title, desc=desc, topics=topics,
                 visibility=visibility, allow_save=allow_save,
-                media_json=json.dumps(files),
-                source_platform=rec.platform, source_content_id=rec.id,
+                media_order=media_order,
             )
-            s.add(task); s.commit(); s.refresh(task)
-            return task.id
 
     def _recover_stale_publish(self) -> None:
         """进程重启或窗口被关后,publishing 会残留且无法点「立即发布」。"""

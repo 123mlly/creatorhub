@@ -134,10 +134,10 @@ uv run playwright install chromium
 cp config.example.yaml config.yaml   # 若尚无 config.yaml
 
 uv run python selftest.py
-uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
+uv run python -m app.serve --host 0.0.0.0 --port 8000
 
-# 开发
-uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --reload-dir app --reload-exclude data
+# 开发热重载（Windows 也要用这个入口，不要直接 uvicorn --reload）
+uv run python -m app.serve --host 0.0.0.0 --port 8000 --reload
 ```
 
 小红书发布还需：

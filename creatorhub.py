@@ -268,8 +268,7 @@ def start(
     command: list[str | Path] = [
         python,
         "-m",
-        "uvicorn",
-        "app.main:app",
+        "app.serve",
         "--host",
         selected_host,
         "--port",
@@ -277,12 +276,8 @@ def start(
     ]
     if reload:
         # 只盯代码,别盯 data/profiles(Chromium 缓存会持续写盘,拖垮 8GB 机器)
-        command.extend([
-            "--reload",
-            "--reload-dir", "app",
-            "--reload-exclude", "data",
-            "--reload-exclude", "*.db",
-        ])
+        # Windows 必须走 app.serve:uvicorn --reload 会切 Selector 循环,Playwright 起不了 Chrome
+        command.append("--reload")
 
     log(f"启动中，按 Ctrl+C 停止；访问地址：{url}")
     run(command)

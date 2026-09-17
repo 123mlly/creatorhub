@@ -13,6 +13,7 @@ from .identity import Identity
 from .manager import BrowserManager
 
 POST_API = "aweme/v1/web/aweme/post"
+DETAIL_API = "aweme/v1/web/aweme/detail"
 PROFILE_API = "aweme/v1/web/user/profile/other"
 SELF_PROFILE_API = "aweme/v1/web/user/profile/self"
 COMMENT_API = "aweme/v1/web/comment/list"
@@ -211,6 +212,127 @@ _SCROLL_COMMENTS = """
   return false;
 }
 """
+
+
+_RENDER_DATA_JS = """() => {
+  const seen = new Set();
+  const pick = (obj) => {
+    if (!obj || typeof obj !== 'object' || seen.has(obj)) return null;
+    seen.add(obj);
+    if (obj.aweme_detail && (obj.aweme_detail.aweme_id || obj.aweme_detail.awemeId))
+      return obj.aweme_detail;
+    if (obj.awemeDetail && (obj.awemeDetail.aweme_id || obj.awemeDetail.awemeId))
+      return obj.awemeDetail;
+    if (Array.isArray(obj)) {
+      for (const item of obj) {
+        const hit = pick(item);
+        if (hit) return hit;
+      }
+      return null;
+    }
+    for (const value of Object.values(obj)) {
+      const hit = pick(value);
+      if (hit) return hit;
+    }
+    return null;
+  };
+  const el = document.getElementById('RENDER_DATA') || document.getElementById('RENDER_DATA_SSR');
+  if (el && el.textContent) {
+    try { return pick(JSON.parse(decodeURIComponent(el.textContent))); } catch (e) {}
+  }
+  try { return pick(window._ROUTER_DATA || window.__NEXT_DATA__ || null); } catch (e) {}
+  return null;
+}"""
+
+
+_DETAIL_URL_HINTS = (
+    "aweme/v1/web/aweme/detail",
+    "aweme/detail",
+    "aweme/iteminfo",
+    "web/api/v2/aweme/iteminfo",
+)
+
+
+def _detail_from_payload(data: dict, aweme_id: str) -> Optional[dict]:
+    if not isinstance(data, dict):
+        return None
+    for key in ("aweme_detail", "aweme_info", "awemeDetail", "awemeInfo"):
+        detail = data.get(key)
+        if isinstance(detail, dict) and (
+            not aweme_id or str(detail.get("aweme_id") or detail.get("awemeId") or "") in ("", str(aweme_id))
+        ):
+            if detail.get("aweme_id") or detail.get("awemeId") or detail.get("video"):
+                if not detail.get("aweme_id") and detail.get("awemeId"):
+                    detail = {**detail, "aweme_id": str(detail.get("awemeId"))}
+                return detail
+    for key in ("item_list", "aweme_list"):
+        for item in data.get(key) or []:
+            if not isinstance(item, dict):
+                continue
+            item_id = str(item.get("aweme_id") or item.get("awemeId") or "")
+            if item_id == str(aweme_id):
+                if not item.get("aweme_id") and item.get("awemeId"):
+                    item = {**item, "aweme_id": item_id}
+                return item
+    return None
+
+
+async def fetch_aweme_detail(mgr: BrowserManager, identity: Identity, aweme_id: str,
+                             source_url: str = "", settle_ms: int = 1800
+                             ) -> Optional[dict]:
+    """用账号持久 profile 打开作品页,拦截 aweme/detail 或解析 RENDER_DATA。
+
+    直连 HTTP 被风控空 body 时,走真实浏览器(Cookie/ttwid 会被页面刷新)。
+    """
+    collected: Dict[str, dict] = {}
+    url = (source_url or "").strip()
+    if not url or "douyin.com" not in url:
+        url = f"https://www.douyin.com/video/{aweme_id}"
+    # 不挡媒体:部分详情接口由播放器初始化触发;真实访问也会刷新 ttwid
+    page = await mgr.new_page(identity, block_media=False)
+
+    async def on_response(resp):
+        if not any(hint in resp.url for hint in _DETAIL_URL_HINTS):
+            return
+        try:
+            data = await resp.json()
+        except Exception:
+            return
+        detail = _detail_from_payload(data if isinstance(data, dict) else {}, aweme_id)
+        if isinstance(detail, dict):
+            collected[str(aweme_id)] = detail
+
+    page.on("response", on_response)
+    try:
+        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        deadline = max(settle_ms, 800)
+        waited = 0
+        while str(aweme_id) not in collected and waited < deadline + 2500:
+            await page.wait_for_timeout(400)
+            waited += 400
+        if str(aweme_id) not in collected:
+            try:
+                rendered = await page.evaluate(_RENDER_DATA_JS)
+                if isinstance(rendered, dict):
+                    if not rendered.get("aweme_id") and rendered.get("awemeId"):
+                        rendered = {**rendered, "aweme_id": str(rendered.get("awemeId"))}
+                    collected[str(aweme_id)] = rendered
+            except Exception:
+                pass
+    except Exception as exc:
+        print(f"[share] browser detail goto failed aweme={aweme_id}: {exc!r}", flush=True)
+    finally:
+        try:
+            await page.close()
+        except Exception:
+            pass
+    hit = collected.get(str(aweme_id))
+    if hit:
+        print(f"[share] browser detail hit aweme={aweme_id} keys={sorted(hit)[:8]}",
+              flush=True)
+    else:
+        print(f"[share] browser detail miss aweme={aweme_id} url={url}", flush=True)
+    return hit
 
 
 async def fetch_comments(mgr: BrowserManager, identity: Identity, aweme_id: str,

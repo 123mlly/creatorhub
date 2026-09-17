@@ -244,6 +244,13 @@ class BrowserManager:
 
     async def start(self):
         sanitize_playwright_browsers_path()
+        if sys.platform == "win32":
+            loop = asyncio.get_running_loop()
+            if isinstance(loop, asyncio.SelectorEventLoop):
+                raise RuntimeError(
+                    "Windows 上当前事件循环无法启动 Chromium（uvicorn --reload 会切到 "
+                    "SelectorEventLoop）。请改用: uv run python -m app.serve --reload"
+                )
         self._pw = await async_playwright().start()
         self._chrome_major = await self._detect_chrome_major()
 

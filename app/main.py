@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -34,7 +35,7 @@ from .browser import (BrowserManager, cookie_string_to_state,
                       fetch_self_profile, fetch_xhs_self_profile, fetch_ks_self_profile,
                       fetch_channels_self_profile,
                       fetch_account_works, fetch_follows, fetch_dm_conversations,
-                      fetch_dm_history)
+                      fetch_dm_history, fetch_aweme_detail)
 from .runtime import is_docker, qr_login_enabled
 from .platforms.douyin import (
     DouyinClient,
@@ -1895,6 +1896,21 @@ def _write_account_cookie_file(account_id: int | None) -> tuple[str, str, str]:
         prefix="creatorhub-share-", suffix=".cookies.txt", delete=False,
     )
     try:
+        _write_netscape_cookie_file(cookies, fh)
+    finally:
+        fh.close()
+    return fh.name, account_proxy, account_ua
+
+
+def _write_netscape_cookie_file(cookies: list, fh_or_path) -> None:
+    """把 Playwright cookies 写成 Netscape cookiefile(yt-dlp 可读)。"""
+    close = False
+    if isinstance(fh_or_path, (str, Path)):
+        fh = open(fh_or_path, "w", encoding="utf-8", newline="\n")
+        close = True
+    else:
+        fh = fh_or_path
+    try:
         fh.write("# Netscape HTTP Cookie File\n")
         for cookie in cookies:
             name = str(cookie.get("name") or "").replace("\t", "").replace("\n", "")
@@ -1915,8 +1931,8 @@ def _write_account_cookie_file(account_id: int | None) -> tuple[str, str, str]:
                 f"{expires}\t{name}\t{value}\n"
             )
     finally:
-        fh.close()
-    return fh.name, account_proxy, account_ua
+        if close:
+            fh.close()
 
 
 def _share_file_role(path: Path) -> str:
@@ -2065,6 +2081,53 @@ def _backfill_share_download_history() -> int:
     return restored
 
 
+def _share_history_media_files(record: ShareDownloadRecord) -> list[str]:
+    try:
+        files = json.loads(record.files_json or "[]")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        files = []
+    if not isinstance(files, list):
+        files = []
+    media = [item for item in files
+             if isinstance(item, dict) and item.get("role") == "media" and item.get("path")]
+    video_exts = {".mp4", ".mkv", ".webm", ".mov", ".flv", ".avi", ".m4v"}
+    image_exts = {".jpg", ".jpeg", ".png", ".webp", ".avif"}
+
+    def _sort_key(item: dict) -> tuple:
+        path = Path(str(item["path"]))
+        ext = path.suffix.lower()
+        if ext in video_exts:
+            return (0, path.name.lower())
+        if ext in image_exts:
+            return (1, path.name.lower())
+        return (2, path.name.lower())
+
+    media.sort(key=_sort_key)
+    paths: list[str] = []
+    for item in media:
+        path = Path(str(item["path"]))
+        if path.is_file():
+            paths.append(str(path.resolve()))
+    return paths
+
+
+def _infer_share_media_type(record: ShareDownloadRecord, files: list[str]) -> str:
+    mt = (record.media_type or "").strip()
+    if mt in ("video", "images"):
+        return mt
+    video_exts = {".mp4", ".mkv", ".webm", ".mov", ".flv", ".avi", ".m4v"}
+    image_exts = {".jpg", ".jpeg", ".png", ".webp", ".avif"}
+    has_video = any(Path(p).suffix.lower() in video_exts for p in files)
+    image_count = sum(1 for p in files if Path(p).suffix.lower() in image_exts)
+    if has_video and image_count == 0:
+        return "video"
+    if image_count > 1:
+        return "images"
+    if image_count == 1 and not has_video:
+        return "images"
+    return "video" if has_video else "images"
+
+
 def _share_history_dict(record: ShareDownloadRecord) -> dict:
     try:
         files = json.loads(record.files_json or "[]")
@@ -2117,6 +2180,51 @@ def _native_aweme_metadata(aweme, source_url: str) -> dict:
     }
 
 
+async def _refresh_share_cookies(identity, account_id: int, cookie_file: str) -> None:
+    """把浏览器刚访问后的 Cookie(含新 ttwid)写回账号,并覆盖 yt-dlp cookiefile。"""
+    if browser is None:
+        return
+    ctx = await browser.context_for(identity)
+    state = await ctx.storage_state()
+    cookies = list(state.get("cookies") or [])
+    if not cookies:
+        return
+    state_json = json.dumps(state)
+    with get_session() as s:
+        acc = s.get(DouyinAccount, account_id)
+        if acc:
+            acc.storage_state = state_json
+            s.add(acc)
+            s.commit()
+    if cookie_file:
+        _write_netscape_cookie_file(cookies, cookie_file)
+
+
+async def _douyin_browser_aweme_detail(
+    account_id: int, aweme_id: str, source_url: str, cookie_file: str = "",
+) -> dict | None:
+    """用账号持久 Chromium profile 打开作品页,拦截详情并刷新 Cookie。"""
+    if browser is None:
+        return None
+    with get_session() as s:
+        account = s.get(DouyinAccount, account_id)
+        if not account or account.platform != "douyin":
+            return None
+        identity = browser.identity_for(account)
+    lock = browser.lock_for(f"acc:{account_id}")
+    async with lock:
+        try:
+            raw = await fetch_aweme_detail(browser, identity, aweme_id, source_url)
+        except Exception as exc:
+            print(f"[share] browser detail failed aweme={aweme_id}: {exc!r}", flush=True)
+            raw = None
+        try:
+            await _refresh_share_cookies(identity, account_id, cookie_file)
+        except Exception as exc:
+            print(f"[share] refresh cookies failed aweme={aweme_id}: {exc!r}", flush=True)
+        return raw
+
+
 async def _douyin_native_share(
     source_url: str,
     *,
@@ -2128,10 +2236,11 @@ async def _douyin_native_share(
     save_thumbnail: bool,
     proxy: str,
     user_agent: str,
+    cookie_file: str = "",
 ) -> dict | None:
     """用 CreatorHub 自带抖音接口兜底 yt-dlp 尚未支持的 /note/、/slides/。
 
-    返回 None 表示它不是可解析的抖音单作品链接，应继续走通用提取器。
+    返回 None 表示它不是可解析的抖音单作品链接，或原生详情失败且可回退 yt-dlp。
     """
     if account_id is None:
         return None
@@ -2139,23 +2248,86 @@ async def _douyin_native_share(
     if not aweme_id:
         return None
 
+    # /note/ /slides/ 图文 yt-dlp 通常搞不定,原生失败应硬报错;普通 /video/ 可回退。
+    needs_native = bool(re.search(r"/(?:note|slides)/", source_url or ""))
+
     with get_session() as s:
         account = s.get(DouyinAccount, account_id)
         if not account or account.platform != "douyin":
             return None
-        state = account.storage_state or account.creator_storage_state or ""
+        # 账号绑定代理优先:登录态与出口 IP 不一致时详情接口常被空 body 风控
+        account_proxy = (account.proxy or "").strip()
+        identity = browser.identity_for(account) if browser is not None else None
+    use_proxy = (proxy or "").strip() or account_proxy
+
+    # 先把磁盘 profile 里较新的 Cookie 写回库/cookiefile,再读出来做直连
+    if identity is not None and browser is not None:
+        lock = browser.lock_for(f"acc:{account_id}")
+        async with lock:
+            try:
+                await _refresh_share_cookies(identity, account_id, cookie_file)
+            except Exception as exc:
+                print(f"[share] pre-sync cookies failed aweme prep: {exc!r}", flush=True)
+
+    with get_session() as s:
+        account = s.get(DouyinAccount, account_id)
+        if not account or account.platform != "douyin":
+            return None
+        states = [
+            account.storage_state or "",
+            account.creator_storage_state or "",
+        ]
         raw_cookie = account.cookie or ""
-    cookie = douyin_cookie_from_state(state) or raw_cookie
-    client = DouyinClient(cookie, user_agent, timeout=cfg.engine.request_timeout_seconds)
-    raw = await client.fetch_video_detail(aweme_id)
-    if not raw:
-        raise ShareDownloadError(
-            "已识别到抖音作品 ID，但所选账号未能读取作品详情；"
-            "请检查账号登录态或更换抖音账号"
+
+    cookies: list[str] = []
+    for state in states:
+        c = douyin_cookie_from_state(state)
+        if c and c not in cookies:
+            cookies.append(c)
+    if raw_cookie and raw_cookie not in cookies:
+        cookies.append(raw_cookie)
+
+    raw = None
+    last_cookie = ""
+    for cookie in cookies:
+        last_cookie = cookie
+        client = DouyinClient(
+            cookie, user_agent,
+            timeout=cfg.engine.request_timeout_seconds,
+            proxy=use_proxy,
         )
+        raw = await client.fetch_video_detail(aweme_id)
+        if raw:
+            break
+    if not raw:
+        print(f"[share] douyin HTTP detail miss aweme={aweme_id}, try browser "
+              f"(proxy={'on' if use_proxy else 'off'})", flush=True)
+        raw = await _douyin_browser_aweme_detail(
+            account_id, aweme_id, source_url, cookie_file=cookie_file,
+        )
+    if not raw:
+        has_session = "sessionid=" in (last_cookie or "")
+        hint = (
+            "请检查账号登录态或更换抖音账号"
+            if has_session else
+            "Cookie 缺少 sessionid，请重新扫码登录该抖音账号"
+        )
+        if needs_native or not cookies:
+            raise ShareDownloadError(
+                "已识别到抖音作品 ID，但所选账号未能读取作品详情；" + hint
+            )
+        # 普通视频:浏览器已刷新 Cookie,把机会留给 yt-dlp
+        print(f"[share] douyin native detail miss aweme={aweme_id}, fallback yt-dlp "
+              f"(sessionid={'yes' if has_session else 'no'}, proxy={'on' if use_proxy else 'off'})",
+              flush=True)
+        return None
     aweme = parse_aweme(raw, quality if quality != "audio" else "highest")
     if not aweme:
-        raise ShareDownloadError("抖音作品详情已读取，但没有找到可下载的视频或图片")
+        if needs_native:
+            raise ShareDownloadError("抖音作品详情已读取，但没有找到可下载的视频或图片")
+        print(f"[share] douyin parse_aweme miss aweme={aweme_id}, fallback yt-dlp",
+              flush=True)
+        return None
 
     # 原生直链下载器不做音频转码；仅音频请求继续交给 yt-dlp/ffmpeg。
     if quality == "audio" and aweme.media_type == "video":
@@ -2176,7 +2348,7 @@ async def _douyin_native_share(
         timeout=max(30.0, cfg.engine.request_timeout_seconds),
     )
     ok, _local_path, error = await downloader.download_aweme(
-        aweme, base_dir=str(output_root), proxy=proxy
+        aweme, base_dir=str(output_root), proxy=use_proxy
     )
     if not ok:
         raise ShareDownloadError(error or "抖音媒体下载失败")
@@ -2211,7 +2383,7 @@ async def _douyin_native_share(
                 timeout=max(30.0, cfg.engine.request_timeout_seconds),
                 follow_redirects=True,
                 headers=headers,
-                proxy=normalize_proxy(proxy) or None,
+                proxy=normalize_proxy(use_proxy) or None,
             ) as http:
                 await downloader._download_one(http, aweme.cover, cover_path)
         except Exception:
@@ -2310,6 +2482,7 @@ async def share_download(body: ShareDownloadIn):
                             save_thumbnail=body.save_thumbnail,
                             proxy=proxy,
                             user_agent=user_agent,
+                            cookie_file=cookie_file,
                         )
                     if item is not None:
                         pass
@@ -2387,6 +2560,62 @@ async def delete_share_download_history(record_id: int):
         s.delete(record)
         s.commit()
     return {"ok": True}
+
+
+@app.get("/api/share-download/history/{record_id}/media")
+async def share_download_history_media(record_id: int):
+    """链接下载历史的本地媒体,供转发弹窗预览。"""
+    with get_session() as s:
+        record = s.get(ShareDownloadRecord, record_id)
+        if not record:
+            raise HTTPException(404, "下载历史不存在")
+        if record.status != "done":
+            raise HTTPException(400, "该记录尚未下载成功,无法转发")
+        files = _share_history_media_files(record)
+        if not files:
+            raise HTTPException(404, "未找到本地媒体文件")
+        media_type = _infer_share_media_type(record, files)
+        image_exts = {".jpg", ".jpeg", ".png", ".webp", ".avif"}
+        medias = []
+        for idx, path in enumerate(files):
+            ext = Path(path).suffix.lower()
+            kind = "video" if ext not in image_exts else "image"
+            medias.append({
+                "kind": kind,
+                "url": f"/api/share-download/history/{record_id}/file/{idx}",
+            })
+        local_url = medias[0]["url"] if medias and media_type == "video" else ""
+        return {
+            "id": record.id,
+            "platform": record.platform,
+            "desc": record.title or "",
+            "media_type": media_type,
+            "cover_url": record.cover_url or "",
+            "local_path": record.output_dir or files[0],
+            "medias": medias,
+            "local_url": local_url,
+        }
+
+
+@app.api_route("/api/share-download/history/{record_id}/file/{file_index}",
+               methods=["GET", "HEAD"])
+async def share_download_history_file(record_id: int, file_index: int):
+    with get_session() as s:
+        record = s.get(ShareDownloadRecord, record_id)
+        if not record:
+            raise HTTPException(404, "下载历史不存在")
+        files = _share_history_media_files(record)
+    if file_index < 0 or file_index >= len(files):
+        raise HTTPException(404, "媒体文件不存在")
+    path = Path(files[file_index])
+    if not path.is_file():
+        raise HTTPException(404, "媒体文件不存在")
+    return FileResponse(
+        path,
+        filename=path.name,
+        content_disposition_type="inline",
+        headers={"Cache-Control": "private, no-cache"},
+    )
 
 
 # ─────────── 监控目标 ───────────
@@ -3649,6 +3878,94 @@ async def repost_to_youtube(cid: int, body: RepostIn):
 async def repost_to_tiktok(cid: int, body: RepostIn):
     """把一条已下载的视频转成 TikTok Studio 发布任务。"""
     return await _repost_content(cid, body, "tiktok")
+
+
+async def _repost_share_history(record_id: int, body: RepostIn, target_platform: str):
+    if not engine:
+        raise HTTPException(503, "引擎未就绪")
+    if target_platform not in _REPOST_PF_NAME:
+        raise HTTPException(400, f"不支持转发到 {target_platform}")
+    with get_session() as s:
+        record = s.get(ShareDownloadRecord, record_id)
+        if not record:
+            raise HTTPException(404, "下载历史不存在")
+        if record.status != "done":
+            raise HTTPException(400, "该记录尚未下载成功,无法转发")
+        files = _share_history_media_files(record)
+        if not files:
+            raise HTTPException(400, "未找到本地媒体文件,无法转发")
+        media_type = _infer_share_media_type(record, files)
+        if target_platform in ("youtube", "tiktok") and media_type != "video":
+            raise HTTPException(400, f"{_REPOST_PF_NAME[target_platform]} 目前仅支持转发视频")
+        acc = s.get(DouyinAccount, body.account_id)
+        pname = _REPOST_PF_NAME[target_platform]
+        if not acc or acc.platform != target_platform:
+            raise HTTPException(400, f"请选择一个已登录的{pname}账号")
+        if target_platform in ("douyin", "shipinhao", "youtube", "tiktok"):
+            if not (acc.creator_storage_state or acc.storage_state):
+                action = {
+                    "shipinhao": "视频号登录",
+                    "youtube": "YouTube 登录",
+                    "tiktok": "TikTok 登录",
+                    "douyin": "创作者登录",
+                }[target_platform]
+                raise HTTPException(400, f"该{pname}账号不可发布:请先在账号页完成「{action}」")
+        elif not (acc.creator_storage_state or has_creator_cookies(acc.storage_state)):
+            raise HTTPException(400, "该账号不可发布:请对该号完成「小红书扫码登录」或「创作者登录」")
+        default_title = record.title or ""
+        try:
+            metadata = json.loads(record.metadata_json or "{}")
+            if isinstance(metadata, dict) and not default_title:
+                default_title = str(metadata.get("description") or metadata.get("title") or "")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            pass
+    vis = body.visibility if body.visibility in ("public", "friends", "private") else "public"
+    tid = engine.create_files_relay_publish(
+        files,
+        source_platform=record.platform or "generic",
+        account_id=body.account_id,
+        target_platform=target_platform,
+        media_type=media_type,
+        default_title=default_title,
+        default_desc=default_title,
+        title=body.title, desc=body.desc, topics=body.topics,
+        visibility=vis, allow_save=bool(body.allow_save),
+        media_order=body.media_order,
+    )
+    if not tid:
+        raise HTTPException(400, "未找到该作品的本地文件,无法转发")
+    if body.scheduled_at:
+        with get_session() as s:
+            t = s.get(PublishTask, tid)
+            if t:
+                t.scheduled_at = _parse_when(body.scheduled_at)
+                s.add(t); s.commit()
+    return {"ok": True, "task_id": tid}
+
+
+@app.post("/api/share-download/history/{record_id}/repost-xhs")
+async def repost_share_to_xhs(record_id: int, body: RepostIn):
+    return await _repost_share_history(record_id, body, "xhs")
+
+
+@app.post("/api/share-download/history/{record_id}/repost-douyin")
+async def repost_share_to_douyin(record_id: int, body: RepostIn):
+    return await _repost_share_history(record_id, body, "douyin")
+
+
+@app.post("/api/share-download/history/{record_id}/repost-shipinhao")
+async def repost_share_to_channels(record_id: int, body: RepostIn):
+    return await _repost_share_history(record_id, body, "shipinhao")
+
+
+@app.post("/api/share-download/history/{record_id}/repost-youtube")
+async def repost_share_to_youtube(record_id: int, body: RepostIn):
+    return await _repost_share_history(record_id, body, "youtube")
+
+
+@app.post("/api/share-download/history/{record_id}/repost-tiktok")
+async def repost_share_to_tiktok(record_id: int, body: RepostIn):
+    return await _repost_share_history(record_id, body, "tiktok")
 
 # ─────────── 自动评论(规则 + 任务)───────────
 class CommentRuleIn(BaseModel):

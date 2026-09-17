@@ -61,10 +61,14 @@ DEFAULT_PARAMS = {
 
 
 class DouyinClient:
-    def __init__(self, cookie: str, user_agent: str, timeout: float = 20.0):
+    def __init__(self, cookie: str, user_agent: str, timeout: float = 20.0,
+                 proxy: str = ""):
+        from ...browser.manager import normalize_proxy
         self.cookie = cookie or ""
         self.ua = user_agent
         self.timeout = timeout
+        # 账号专属代理:登录态与出口 IP 不一致时详情接口常被风控空 body
+        self.proxy = normalize_proxy(proxy) or None
         self.impersonate = impersonate_for_ua(user_agent)  # TLS 指纹复刻,绕 JA3 风控
 
     def _headers(self, referer: str = BASE + "/") -> Dict[str, str]:
@@ -95,14 +99,20 @@ class DouyinClient:
                         referer: str = BASE + "/") -> Optional[dict]:
         url = self._build_url(path, params)
         async with AsyncSession() as cli:
-            r = await cli.get(url, headers=self._headers(referer),
-                              impersonate=self.impersonate, timeout=self.timeout)
+            r = await cli.get(
+                url,
+                headers=self._headers(referer),
+                impersonate=self.impersonate,
+                timeout=self.timeout,
+                proxy=self.proxy,
+            )
             if r.status_code != 200 or not r.content:
                 # HTTP 200 + 空 body = 被风控拒了(接口本身可能是活的:follower/list 直连
                 # 空 body,页面里发同一个请求却正常)。静默 return None 会让上层把「被拒」
                 # 和「没有数据」混为一谈 —— 那正是 raw=0 查了半天的原因。
                 print(f"[dy-client] {path} → HTTP {r.status_code} len={len(r.content)}"
-                      f"{' (空 body:多半被风控拒,非无数据)' if r.status_code == 200 else ''}")
+                      f"{' (空 body:多半被风控拒,非无数据)' if r.status_code == 200 else ''}"
+                      f"{' proxy=on' if self.proxy else ''}")
                 return None
             try:
                 return r.json()
@@ -168,9 +178,14 @@ class DouyinClient:
         data = await self._get_json(
             "/aweme/v1/web/aweme/detail/",
             {"aweme_id": aweme_id},
+            referer=f"{BASE}/video/{aweme_id}",
         )
         if data and data.get("aweme_detail"):
             return data["aweme_detail"]
+        if data is not None:
+            print(f"[dy-client] aweme/detail → keys={list(data.keys())[:12]}"
+                  f" status_code={data.get('status_code')} "
+                  f"status_msg={data.get('status_msg')!r}")
         return None
 
     # ── 评论(直连 comment/list + reply,分页拉全量;参考 CommentAll)──
