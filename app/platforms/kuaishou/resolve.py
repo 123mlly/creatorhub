@@ -18,7 +18,9 @@ from ...netfp import impersonate_for_ua
 
 _PROFILE_RE = re.compile(r"/profile/([0-9a-zA-Z_\-]+)")
 _PHOTO_RE = re.compile(r"/(?:short-video|video|photo)/([0-9a-zA-Z_\-]+)")
-_SHORT_RE = re.compile(r"https?://v\.kuaishou\.com/[\w\-]+")
+_SHORT_RE = re.compile(
+    r"https?://(?:v\.kuaishou\.com/[\w\-]+|(?:www\.)?kuaishou\.com/f/[\w\-]+)"
+)
 _BARE_ID_RE = re.compile(r"^[0-9a-zA-Z_\-]{8,}$")
 
 

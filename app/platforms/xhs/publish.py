@@ -215,7 +215,7 @@ async def _publish_xhs_browser(mgr: BrowserManager, identity: Identity, media_ty
                                headed: bool, timeout_seconds: int) -> Tuple[bool, str, str]:
     body = (desc + ("\n" + " ".join(f"#{t}" for t in tags) if tags else "")).strip()[:1000]
     # 用账号专属持久 profile(独立 UA/代理/指纹);登录态已在 profile 里
-    ctx = await mgr.open_headed(identity)
+    ctx = await mgr.open_headed(identity, steal_focus=False)
     page = await ctx.new_page()
     ok, result_url, error = False, "", ""
     try:

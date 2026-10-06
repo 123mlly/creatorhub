@@ -47,6 +47,10 @@ def _win32_api():
     user32.AttachThreadInput.restype = wintypes.BOOL
     user32.ShowWindowAsync.argtypes = [wintypes.HWND, ctypes.c_int]
     user32.ShowWindowAsync.restype = wintypes.BOOL
+    user32.IsWindow.argtypes = [wintypes.HWND]
+    user32.IsWindow.restype = wintypes.BOOL
+    user32.IsIconic.argtypes = [wintypes.HWND]
+    user32.IsIconic.restype = wintypes.BOOL
     user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int,
                                    ctypes.c_int, ctypes.c_int, ctypes.c_int,
                                    wintypes.UINT]
@@ -105,7 +109,8 @@ def capture_window_snapshot(class_names: Iterable[str]) -> WindowSnapshot:
         return WindowSnapshot(0, frozenset())
 
 
-def _activate_window(hwnd: int, foreground: int) -> bool:
+def _activate_window(hwnd: int, foreground: int, *, keep_size: bool = False) -> bool:
+    """把 hwnd 拉到前台。keep_size=True 时不 SW_RESTORE,避免把最大化窗口还原。"""
     api = _win32_api()
     if not api:
         return False
@@ -121,14 +126,57 @@ def _activate_window(hwnd: int, foreground: int) -> bool:
             if thread_id and thread_id != current_thread and \
                     user32.AttachThreadInput(current_thread, thread_id, True):
                 attached.append(thread_id)
-        user32.ShowWindowAsync(hwnd, 9)  # SW_RESTORE
-        flags = 0x0001 | 0x0002 | 0x0040  # SWP_NOSIZE | SWP_NOMOVE | SWP_SHOWWINDOW
-        positioned = bool(user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, flags))  # HWND_TOP
+        # SW_RESTORE(9) 会把最大化窗口还原成普通大小。只对最小化窗口用。
+        if user32.IsIconic(hwnd):
+            user32.ShowWindowAsync(hwnd, 9)
+        elif not keep_size:
+            user32.ShowWindowAsync(hwnd, 5)  # SW_SHOW,保持当前尺寸
+        flags = 0x0001 | 0x0002  # SWP_NOSIZE | SWP_NOMOVE
+        if not keep_size:
+            flags |= 0x0040  # SWP_SHOWWINDOW
+        positioned = bool(user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, flags))
         focused = bool(user32.SetForegroundWindow(hwnd))
         return positioned or focused
     finally:
         for thread_id in reversed(attached):
             user32.AttachThreadInput(current_thread, thread_id, False)
+
+
+def restore_foreground(snapshot: WindowSnapshot, timeout: float = 1.8) -> bool:
+    """新 Chromium 窗口抢焦点时,把焦点还给启动前的前台窗口。
+    用户切到其它应用后不再争夺;只压新出现的 Chromium。"""
+    if sys.platform != "win32":
+        return False
+    prev = snapshot.foreground
+    if not prev:
+        return False
+    api = _win32_api()
+    if not api:
+        return False
+    _, user32, _, _ = api
+    if not user32.IsWindow(prev):
+        return False
+    known = set(snapshot.handles)
+    deadline = time.monotonic() + timeout
+    restored = False
+    try:
+        while time.monotonic() < deadline:
+            if not user32.IsWindow(prev):
+                break
+            current = _foreground_window()
+            if current == prev:
+                restored = True
+            else:
+                chrome = {hwnd for hwnd, _ in _visible_windows(CHROMIUM_WINDOW_CLASSES)}
+                if current in (chrome - known):
+                    if _activate_window(prev, current, keep_size=True):
+                        restored = True
+                elif restored:
+                    break
+            time.sleep(0.08)
+    except Exception:
+        pass
+    return restored
 
 
 def bring_window_to_front(snapshot: WindowSnapshot, class_names: Iterable[str],

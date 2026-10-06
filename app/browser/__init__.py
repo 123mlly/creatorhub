@@ -12,7 +12,7 @@ from .xhs_fetcher import (fetch_xhs_notes, fetch_xhs_search, fetch_xhs_note_deta
                           fetch_xhs_comments, fetch_xhs_self_profile,
                           fetch_creator_published)
 from .ks_fetcher import (fetch_ks_videos, fetch_ks_comments, fetch_ks_self_profile,
-                         post_ks_comment)
+                         fetch_ks_video_detail, post_ks_comment)
 from .channels_fetcher import (fetch_channels_works, fetch_channels_comments,
                                fetch_channels_self_profile, post_channels_comment)
 from .account_hub import (fetch_account_works, fetch_follows,
@@ -31,7 +31,7 @@ __all__ = ["BrowserManager", "cookie_string_to_state",
            "fetch_xhs_notes", "fetch_xhs_search", "fetch_xhs_note_detail",
            "fetch_xhs_comments", "fetch_xhs_self_profile", "fetch_creator_published",
            "fetch_ks_videos", "fetch_ks_comments", "fetch_ks_self_profile",
-           "post_ks_comment",
+           "fetch_ks_video_detail", "post_ks_comment",
            "fetch_channels_works", "fetch_channels_comments",
            "fetch_channels_self_profile", "post_channels_comment",
            "fetch_account_works", "fetch_follows",

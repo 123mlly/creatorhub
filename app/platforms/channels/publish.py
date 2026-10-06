@@ -215,7 +215,7 @@ async def publish_channels(mgr: BrowserManager, identity: Identity,
     body = ((desc or "")
             + ("\n" + " ".join(f"#{t}" for t in tags) if tags else "")).strip()[:1000]
 
-    ctx = await mgr.open_headed(identity)
+    ctx = await mgr.open_headed(identity, steal_focus=False)
     page = await ctx.new_page()
     ok, result_url, error = False, "", ""
     try:

@@ -5,6 +5,10 @@ uvicorn --reload / workers>1 会调用 asyncio_setup(use_subprocess=True),
 asyncio.create_subprocess_exec, Playwright 就会 NotImplementedError。
 
 macOS 的 Selector 循环本身能起进程,所以那边 --reload 是好的。
+
+Windows 上 uvicorn --reload 还会把 listen socket 传给子进程;Proactor
+不能对继承来的 socket Accept(WinError 87)。热重载改由 app.serve 父进程
+只监文件、子进程自己 bind,见 app/serve.py _windows_reload。
 """
 from __future__ import annotations
 

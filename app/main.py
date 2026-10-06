@@ -35,7 +35,7 @@ from .browser import (BrowserManager, cookie_string_to_state,
                       fetch_self_profile, fetch_xhs_self_profile, fetch_ks_self_profile,
                       fetch_channels_self_profile,
                       fetch_account_works, fetch_follows, fetch_dm_conversations,
-                      fetch_dm_history, fetch_aweme_detail)
+                      fetch_dm_history, fetch_aweme_detail, fetch_ks_video_detail)
 from .runtime import is_docker, qr_login_enabled
 from .platforms.douyin import (
     DouyinClient,
@@ -55,7 +55,8 @@ from .platforms.xhs import (resolve_note as xhs_resolve_note,
                   has_creator_cookies)
 from .platforms.kuaishou import (resolve_ks_user_id, resolve_ks_photo_id,
                   looks_like_photo as ks_looks_like_photo,
-                  parse_self_user as parse_ks_self_user)
+                  parse_self_user as parse_ks_self_user,
+                  parse_ks_feed)
 from .platforms.youtube import (
     resolve_youtube_channel_ref,
     fetch_youtube_self_profile,
@@ -2414,6 +2415,143 @@ async def _douyin_native_share(
     }
 
 
+async def _kuaishou_native_share(
+    source_url: str,
+    *,
+    account_id: int | None,
+    output_root: Path,
+    quality: str,
+    should_download: bool,
+    save_metadata: bool,
+    save_thumbnail: bool,
+    proxy: str,
+    user_agent: str,
+) -> dict | None:
+    """yt-dlp 不认 www.kuaishou.com/short-video/ 与 /f/ 分享链,用账号浏览器拦截详情。"""
+    if browser is None:
+        return None
+    identity = None
+    account_proxy = ""
+    if account_id is not None:
+        with get_session() as s:
+            account = s.get(DouyinAccount, account_id)
+            if account and account.platform == "kuaishou":
+                identity = browser.identity_for(account)
+                account_proxy = (account.proxy or "").strip()
+    if identity is None:
+        raise ShareDownloadError(
+            "已识别到快手作品链接，但需要选择一个已登录的快手账号才能下载；"
+            "yt-dlp 不支持 www.kuaishou.com/short-video 与 /f/ 分享页"
+        )
+    use_proxy = (proxy or "").strip() or account_proxy
+    photo_id = await resolve_ks_photo_id(source_url, user_agent) or ""
+    lock = browser.lock_for(f"acc:{account_id}")
+    async with lock:
+        try:
+            raw = await fetch_ks_video_detail(
+                browser, identity, source_url=source_url, photo_id=photo_id,
+            )
+        except Exception as exc:
+            print(f"[share] ks browser detail failed: {exc!r}", flush=True)
+            raw = None
+        try:
+            await _refresh_share_cookies(identity, account_id, "")
+        except Exception as exc:
+            print(f"[share] ks refresh cookies failed: {exc!r}", flush=True)
+    if not raw:
+        raise ShareDownloadError(
+            "已识别到快手作品，但所选账号未能读取作品详情；请检查登录态或更换快手账号"
+        )
+    aweme = parse_ks_feed(raw, quality if quality != "audio" else "highest")
+    if not aweme:
+        raise ShareDownloadError("快手作品详情已读取，但没有找到可下载的视频或图片")
+    if quality == "audio" and aweme.media_type == "video":
+        return None
+
+    metadata = {
+        **_native_aweme_metadata(aweme, source_url),
+        "extractor": "creatorhub:kuaishou",
+        "extractor_key": "CreatorHubKuaishou",
+        "platform": "kuaishou",
+    }
+    if not should_download:
+        return {
+            "ok": True,
+            "url": source_url,
+            "metadata": metadata,
+            "warnings": [],
+        }
+
+    downloader = Downloader(
+        str(output_root),
+        user_agent,
+        timeout=max(30.0, cfg.engine.request_timeout_seconds),
+    )
+    ok, _local_path, error = await downloader.download_aweme(
+        aweme, base_dir=str(output_root), proxy=use_proxy
+    )
+    if not ok:
+        raise ShareDownloadError(error or "快手媒体下载失败")
+
+    target_dir = output_root / safe_title(aweme.author_name or "unknown")
+    title = safe_title(aweme.desc) or aweme.aweme_id
+    if save_metadata:
+        info_path = target_dir / f"{aweme.aweme_id}_{title}.info.json"
+        payload = {
+            **metadata,
+            "media": [
+                {"url": media.url, "kind": media.kind, "ext": media.ext,
+                 "index": media.index}
+                for media in aweme.medias
+            ],
+            "raw": raw,
+        }
+        info_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2, default=str),
+            encoding="utf-8",
+        )
+    if save_thumbnail and aweme.media_type == "video" and aweme.cover:
+        import httpx
+        from .browser.manager import normalize_proxy
+
+        cover_path = target_dir / f"{aweme.aweme_id}_{title}.cover.jpg"
+        headers = {"User-Agent": user_agent, "Referer": "https://www.kuaishou.com/"}
+        try:
+            async with httpx.AsyncClient(
+                timeout=max(30.0, cfg.engine.request_timeout_seconds),
+                follow_redirects=True,
+                headers=headers,
+                proxy=normalize_proxy(use_proxy) or None,
+            ) as http:
+                await downloader._download_one(http, aweme.cover, cover_path)
+        except Exception:
+            pass
+
+    files = []
+    for path in sorted(target_dir.glob(f"{aweme.aweme_id}_*")):
+        if not path.is_file() or path.suffix.lower() in {".part", ".ytdl"}:
+            continue
+        files.append({
+            "name": path.name,
+            "path": str(path.resolve()),
+            "relative_path": path.relative_to(output_root).as_posix(),
+            "size": path.stat().st_size,
+            "role": _share_file_role(path),
+        })
+    if not any(item["role"] == "media" for item in files):
+        raise ShareDownloadError("快手作品解析成功，但本地没有生成媒体文件")
+    return {
+        "ok": True,
+        "job_id": f"kuaishou_{aweme.aweme_id}",
+        "url": source_url,
+        "output_dir": str(target_dir.resolve()),
+        "metadata": metadata,
+        "files": files,
+        "progress": {"status": "finished"},
+        "warnings": [],
+    }
+
+
 @app.post("/api/share-download/links")
 async def parse_share_links(body: ShareLinksIn):
     """只做本地文本清洗和链接提取，不访问分享站点。"""
@@ -2483,6 +2621,18 @@ async def share_download(body: ShareDownloadIn):
                             proxy=proxy,
                             user_agent=user_agent,
                             cookie_file=cookie_file,
+                        )
+                    elif link.platform == "kuaishou":
+                        item = await _kuaishou_native_share(
+                            link.url,
+                            account_id=body.account_id,
+                            output_root=output_root,
+                            quality=body.quality,
+                            should_download=body.download,
+                            save_metadata=body.save_metadata,
+                            save_thumbnail=body.save_thumbnail,
+                            proxy=proxy,
+                            user_agent=user_agent,
                         )
                     if item is not None:
                         pass

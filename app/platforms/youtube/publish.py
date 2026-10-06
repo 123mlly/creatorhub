@@ -879,7 +879,7 @@ async def publish_youtube(mgr: BrowserManager, identity: Identity,
     _log(f"title({len(title)}): {title[:60]}{'…' if len(title) > 60 else ''}")
     _log(f"desc({len(body)}): {body[:60]}{'…' if len(body) > 60 else ''}")
 
-    ctx = await mgr.open_headed(identity)
+    ctx = await mgr.open_headed(identity, steal_focus=False)
     page = await ctx.new_page()
     ok, result_url, error = False, "", ""
     try:

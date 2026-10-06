@@ -783,6 +783,15 @@ def _clean_ydl_error(message: str) -> str:
             "这是抖音图文作品；请在“复用账号登录态”中选择一个已登录的抖音账号，"
             "CreatorHub 将通过原生抖音接口下载全部图片和作品元数据"
         )
+    if "unsupported url" in lowered and (
+        "kuaishou.com/short-video/" in lowered
+        or "kuaishou.com/f/" in lowered
+        or "kuaishou.com" in lowered
+    ):
+        return (
+            "yt-dlp 不支持这条快手网页/分享链；请选择一个已登录的快手账号，"
+            "CreatorHub 将用浏览器打开作品页下载"
+        )
     return clean or "媒体提取失败"
 
 

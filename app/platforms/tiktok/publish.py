@@ -431,7 +431,7 @@ async def publish_tiktok(mgr: BrowserManager, identity: Identity,
     upload_path, stage_dir = _stage_english_named(files[0], title or caption)
     ctx = page = None
     try:
-        ctx = await mgr.open_headed(identity)
+        ctx = await mgr.open_headed(identity, steal_focus=False)
         page = await ctx.new_page()
         await page.goto(STUDIO_UPLOAD, wait_until="domcontentloaded", timeout=60000)
         if not await _sleep(page, 3500):

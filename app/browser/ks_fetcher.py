@@ -261,6 +261,107 @@ async def fetch_ks_comments(mgr: BrowserManager, identity: Identity, photo_id: s
     return new, error
 
 
+def _feed_from_payload(data: dict) -> Optional[dict]:
+    """从 GraphQL / REST JSON 里抽出 parse_ks_feed 能吃的 {photo, author}。"""
+    if not isinstance(data, dict):
+        return None
+    blobs = [data, data.get("data") if isinstance(data.get("data"), dict) else None]
+    blobs = [b for b in blobs if isinstance(b, dict)]
+    for blob in blobs:
+        for key in ("visionVideoDetail", "visionVideoDetailPhoto", "photo"):
+            node = blob.get(key)
+            if not isinstance(node, dict):
+                continue
+            photo = node.get("photo") if isinstance(node.get("photo"), dict) else node
+            if not isinstance(photo, dict):
+                continue
+            if photo.get("photoUrl") or photo.get("id") or photo.get("photoId"):
+                author = (node.get("author") or photo.get("author")
+                          or blob.get("author") or {})
+                return {"photo": photo, "author": author if isinstance(author, dict) else {}}
+    return None
+
+
+async def fetch_ks_video_detail(mgr: BrowserManager, identity: Identity,
+                                source_url: str = "", photo_id: str = "",
+                                settle_ms: int = 2200) -> Optional[dict]:
+    """打开快手作品页或 /f/ 分享链,拦截 visionVideoDetail / photo 详情。
+
+    yt-dlp 不认 www.kuaishou.com/short-video/ 与 /f/ 分享页,走浏览器拿直链。
+    """
+    url = (source_url or "").strip()
+    if not url or "kuaishou.com" not in url:
+        if not photo_id:
+            return None
+        url = PHOTO_URL.format(pid=photo_id)
+    collected: Dict[str, dict] = {}
+    page = await mgr.new_page(identity, block_media=False)
+
+    async def on_response(resp):
+        if resp.request.resource_type not in ("xhr", "fetch"):
+            return
+        if "kuaishou.com" not in resp.url:
+            return
+        try:
+            data = await resp.json()
+        except Exception:
+            return
+        feed = _feed_from_payload(data if isinstance(data, dict) else {})
+        if isinstance(feed, dict):
+            collected["hit"] = feed
+
+    page.on("response", on_response)
+    try:
+        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        waited = 0
+        while "hit" not in collected and waited < max(settle_ms, 800) + 2500:
+            await page.wait_for_timeout(400)
+            waited += 400
+        if "hit" not in collected:
+            try:
+                rendered = await page.evaluate("""() => {
+                  const pick = (obj, seen) => {
+                    if (!obj || typeof obj !== 'object' || seen.has(obj)) return null;
+                    seen.add(obj);
+                    if (obj.photoUrl && (obj.id || obj.photoId)) return obj;
+                    if (obj.photo && obj.photo.photoUrl) return obj;
+                    if (Array.isArray(obj)) {
+                      for (const item of obj) {
+                        const hit = pick(item, seen);
+                        if (hit) return hit;
+                      }
+                      return null;
+                    }
+                    for (const value of Object.values(obj)) {
+                      const hit = pick(value, seen);
+                      if (hit) return hit;
+                    }
+                    return null;
+                  };
+                  return pick(window.__INITIAL_STATE__ || window.__APOLLO_STATE__ || null, new Set());
+                }""")
+                if isinstance(rendered, dict):
+                    feed = rendered if rendered.get("photo") else {"photo": rendered,
+                                                                  "author": rendered.get("author") or {}}
+                    if feed.get("photo"):
+                        collected["hit"] = feed
+            except Exception:
+                pass
+    except Exception as exc:
+        print(f"[share] ks browser detail goto failed: {exc!r}", flush=True)
+    finally:
+        try:
+            await page.close()
+        except Exception:
+            pass
+    hit = collected.get("hit")
+    if hit:
+        print("[share] ks browser detail hit", flush=True)
+    else:
+        print(f"[share] ks browser detail miss url={url}", flush=True)
+    return hit
+
+
 _SELF_LINK_RE = re.compile(r"/profile/([0-9a-zA-Z_\-]+)")
 
 # 快手 visionProfile 查询(实测标定,字段与 _dig_profile/parse_self_user 对齐)

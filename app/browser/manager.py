@@ -23,7 +23,7 @@ from urllib.parse import urlparse
 from playwright.async_api import BrowserContext, async_playwright
 
 from ..windowing import (CHROMIUM_WINDOW_CLASSES, bring_window_to_front,
-                         capture_window_snapshot)
+                         capture_window_snapshot, restore_foreground)
 from .identity import Identity, fingerprint_script
 
 
@@ -122,18 +122,27 @@ def _detect_screen_size() -> Optional[Tuple[int, int]]:
     return None
 
 
-def _headed_viewport() -> Tuple[Optional[Dict[str, int]], List[str]]:
-    """有头窗口:尽量铺满当前屏幕;探测失败则最大化并禁用固定 viewport。"""
-    extra = ["--start-maximized"]
+def _headed_viewport(*, steal_focus: bool = True
+                     ) -> Tuple[Optional[Dict[str, int]], List[str]]:
+    """有头窗口:尽量铺满当前屏幕;探测失败则最大化并禁用固定 viewport。
+    steal_focus=False 时不用 --start-maximized,减少启动瞬间抢焦点。"""
+    extra: List[str] = []
+    if steal_focus:
+        extra.append("--start-maximized")
     size = _detect_screen_size()
     if not size:
-        return None, extra
+        if steal_focus:
+            return None, extra
+        extra.extend(["--window-size=1280,800", "--window-position=80,80"])
+        return {"width": 1280, "height": 800}, extra
     sw, sh = size
-    # 预留菜单栏 / Dock / 窗口边框,避免内容区被裁切
     vw = max(1024, min(sw - 40, 3840))
     vh = max(720, min(sh - 100, 2160))
     extra.append(f"--window-size={vw},{vh}")
-    print(f"[browser] headed viewport={vw}x{vh} (screen={sw}x{sh})", flush=True)
+    if not steal_focus:
+        extra.append("--window-position=80,80")
+    print(f"[browser] headed viewport={vw}x{vh} (screen={sw}x{sh} "
+          f"steal_focus={steal_focus})", flush=True)
     return {"width": vw, "height": vh}, extra
 
 # storage_state 里允许注入的 Cookie 字段(playwright add_cookies 接受的键)
@@ -241,6 +250,7 @@ class BrowserManager:
         self._locks: Dict[Any, asyncio.Lock] = {}
         self._cv_lock = asyncio.Lock()                   # 保护 context 字典的创建/驱逐
         self._chrome_major: Optional[int] = None         # 实际 Chromium 大版本(启动时探测)
+        self._focus_tasks: List[asyncio.Task] = []
 
     async def start(self):
         sanitize_playwright_browsers_path()
@@ -321,7 +331,8 @@ class BrowserManager:
         return self._locks.setdefault(key, asyncio.Lock())
 
     # ── 持久化 context ──
-    async def _launch_persistent(self, identity: Identity, headless: bool = True
+    async def _launch_persistent(self, identity: Identity, headless: bool = True,
+                                 steal_focus: bool = True
                                  ) -> BrowserContext:
         pdir = Path(identity.profile_dir)
         pdir.mkdir(parents=True, exist_ok=True)
@@ -335,7 +346,7 @@ class BrowserManager:
                 "height": identity.viewport_h or 800,
             }
         else:
-            viewport, extra = _headed_viewport()
+            viewport, extra = _headed_viewport(steal_focus=steal_focus)
             args.extend(extra)
         kwargs: Dict[str, Any] = dict(
             user_data_dir=str(pdir), headless=headless, args=args,
@@ -453,14 +464,27 @@ class BrowserManager:
             except Exception:
                 pass
 
-    async def open_headed(self, identity: Identity) -> BrowserContext:
+    async def open_headed(self, identity: Identity, steal_focus: bool = True
+                         ) -> BrowserContext:
         """登录/发布:先关掉该账号常驻无头 context(同一 profile 不能并存),
-        再开同 profile 的有头 context。调用方用完务必 await ctx.close()(关闭即落盘 Cookie)。"""
+        再开同 profile 的有头 context。调用方用完务必 await ctx.close()(关闭即落盘 Cookie)。
+        steal_focus=False:窗口仍可见,但尽量把焦点还给启动前的应用(发布用)。"""
         snapshot = capture_window_snapshot(CHROMIUM_WINDOW_CLASSES)
         await self.close_context(identity.key)
-        ctx = await self._launch_persistent(identity, headless=False)
-        await asyncio.to_thread(bring_window_to_front, snapshot,
-                                CHROMIUM_WINDOW_CLASSES, "", 1.5)
+        ctx = await self._launch_persistent(identity, headless=False,
+                                            steal_focus=steal_focus)
+        if steal_focus:
+            await asyncio.to_thread(bring_window_to_front, snapshot,
+                                    CHROMIUM_WINDOW_CLASSES, "", 1.5)
+        else:
+            task = asyncio.create_task(
+                asyncio.to_thread(restore_foreground, snapshot, 3.5)
+            )
+            self._focus_tasks.append(task)
+            task.add_done_callback(
+                lambda t: self._focus_tasks.remove(t)
+                if t in self._focus_tasks else None
+            )
         return ctx
 
 

@@ -224,7 +224,7 @@ async def publish_douyin(mgr: BrowserManager, identity: Identity,
     # 抖音正文 = 简介 + 话题(话题写进正文,发布时自动识别 #)
     body = ((desc or "") + ("\n" + " ".join(f"#{t}" for t in tags) if tags else "")).strip()[:2000]
 
-    ctx = await mgr.open_headed(identity)
+    ctx = await mgr.open_headed(identity, steal_focus=False)
     page = await ctx.new_page()
 
     # 保险:媒体上传我们全用 set_input_files(不触发 filechooser),故任何 filechooser
