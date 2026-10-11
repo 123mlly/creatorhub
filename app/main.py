@@ -66,6 +66,11 @@ from .platforms.tiktok import (
     resolve_tiktok_user_ref,
     fetch_tiktok_self_profile,
     parse_tt_self_user,
+    is_tiktok_shortdrama,
+    parse_tt_play_hit,
+    fetch_tt_video_detail,
+    fetch_tt_drama_series,
+    download_tt_url,
 )
 from .platforms.channels import parse_self_user as parse_channels_self_user
 from .engine import Downloader, MonitorEngine
@@ -1827,6 +1832,43 @@ class ShareDownloadIn(BaseModel):
     max_filesize_mb: int = 0          # 0 = 不限制
     account_id: int | None = None     # 可选：复用已登录账号 Cookie / UA / 代理
     proxy: str = ""                   # 显式填写时优先于账号代理
+    progress_id: str = ""             # 前端轮询用,下载过程中回报第几集
+
+
+_SHARE_PROGRESS: dict[str, dict] = {}
+_PROGRESS_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,80}$")
+
+
+def _share_progress_id(value: str) -> str:
+    value = (value or "").strip()
+    return value if _PROGRESS_ID_RE.match(value) else ""
+
+
+def _share_progress_set(progress_id: str, **fields) -> None:
+    pid = _share_progress_id(progress_id)
+    if not pid:
+        return
+    row = _SHARE_PROGRESS.setdefault(pid, {
+        "status": "running", "current": 0, "total": 0, "message": "", "title": "",
+    })
+    row.update(fields)
+    if len(_SHARE_PROGRESS) > 40:
+        oldest = next(iter(_SHARE_PROGRESS))
+        if oldest != pid:
+            _SHARE_PROGRESS.pop(oldest, None)
+
+
+def _drama_progress(progress_id: str, *, title: str, phase: str, current: int, total: int) -> None:
+    name = f"《{title}》" if title else "短剧"
+    if phase == "open":
+        message = (f"{name}正在读取第 {current}/{total} 集" if total
+                   else f"{name}正在读取第 {current} 集")
+    else:
+        message = f"{name}正在下载第 {current}/{total} 集" if total else f"{name}正在下载第 {current} 集"
+    _share_progress_set(
+        progress_id, message=message, current=current, total=total,
+        title=title or "", status="running",
+    )
 
 
 def _share_input(value: str) -> str:
@@ -1866,6 +1908,9 @@ def _write_account_cookie_file(account_id: int | None) -> tuple[str, str, str]:
             state_for_yt = cookie_string_to_state(raw_cookie, platform)
         path = storage_state_to_cookiefile(state_for_yt)
         if not path:
+            # TikTok 登录态常只在磁盘 profile 里;短剧下载走浏览器,允许没有 Netscape cookiefile
+            if platform == "tiktok":
+                return "", account_proxy, account_ua
             raise HTTPException(400, "所选账号没有可复用的 Cookie 登录态")
         return path, account_proxy, account_ua
 
@@ -2552,6 +2597,334 @@ async def _kuaishou_native_share(
     }
 
 
+async def _tiktok_drama_share(
+    source_url: str,
+    *,
+    identity,
+    account_id: int | None,
+    output_root: Path,
+    quality: str,
+    should_download: bool,
+    save_metadata: bool,
+    save_thumbnail: bool,
+    use_proxy: str,
+    user_agent: str,
+    lock,
+    progress_id: str = "",
+) -> dict:
+    """短剧链接按整部下载:系列 id 不变,集数从 1 到 episodeCount。"""
+    async with lock:
+        def _on_open(current, total, title):
+            _drama_progress(progress_id, title=title, phase="open", current=current, total=total)
+
+        try:
+            series = await fetch_tt_drama_series(
+                browser, identity, source_url, on_progress=_on_open,
+            )
+        except Exception as exc:
+            print(f"[share] tt drama failed: {exc!r}", flush=True)
+            series = {"episodes": [], "error": repr(exc), "title": "", "series_id": "", "episode_count": 0}
+        try:
+            await _refresh_share_cookies(identity, account_id, "")
+        except Exception as exc:
+            print(f"[share] tt refresh cookies failed: {exc!r}", flush=True)
+    episodes = list(series.get("episodes") or [])
+    playable = [ep for ep in episodes if str(ep.get("play_url") or "").startswith("http")]
+    err = str(series.get("error") or "")
+    if err.startswith("logged_out"):
+        raise ShareDownloadError("logged_out:TikTok 登录态失效,请重新登录后再下载整部短剧")
+    if not playable:
+        raise ShareDownloadError(
+            err or "已打开短剧页,但没有读到各集播放地址。请确认登录地区能播放这部剧"
+        )
+    title = str(series.get("title") or playable[0].get("series_title") or playable[0].get("title") or "tiktok")
+    series_id = str(series.get("series_id") or "")
+    total = int(series.get("episode_count") or len(episodes) or len(playable))
+    warnings = []
+    missing = [int(ep.get("episode") or 0) for ep in episodes if not str(ep.get("play_url") or "").startswith("http")]
+    if missing:
+        warnings.append("这些集没有播放地址,已跳过: " + ",".join(str(n) for n in missing if n))
+    if total > len(playable):
+        warnings.append(f"这部剧共 {total} 集,本次拿到 {len(playable)} 集的播放地址")
+    folder = safe_title(title) or series_id or "tiktok"
+    metadata = {
+        "id": series_id,
+        "title": title,
+        "description": f"{title}（共 {total} 集,本次 {len(playable)} 集）",
+        "uploader": str(playable[0].get("author") or "tiktok"),
+        "duration": sum(int(ep.get("duration") or 0) for ep in playable),
+        "webpage_url": source_url,
+        "original_url": source_url,
+        "extractor": "creatorhub:tiktok",
+        "extractor_key": "CreatorHubTikTok",
+        "platform": "tiktok",
+        "episode_count": total,
+        "downloaded_episodes": len(playable),
+    }
+    if not should_download:
+        return {"ok": True, "url": source_url, "metadata": metadata, "warnings": warnings}
+
+    downloader = Downloader(
+        str(output_root),
+        user_agent,
+        timeout=max(30.0, cfg.engine.request_timeout_seconds),
+    )
+    from .platforms.tiktok import play_url_candidates
+
+    saved_ids: list[str] = []
+    for index, ep in enumerate(playable, start=1):
+        n = int(ep.get("episode") or index)
+        raw = dict(ep)
+        raw["title"] = f"EP{n:02d} {title}"
+        raw["author"] = folder
+        aweme = parse_tt_play_hit(raw, quality=quality if quality != "audio" else "highest")
+        if not aweme:
+            warnings.append(f"第 {n} 集没有可下载的视频")
+            continue
+        print(f"[tt-drama] download {n} ({index}/{len(playable)})", flush=True)
+        _drama_progress(
+            progress_id, title=title, phase="download",
+            current=index, total=len(playable),
+        )
+        ok, _local, error = await downloader.download_aweme(
+            aweme, base_dir=str(output_root), proxy=use_proxy
+        )
+        if not ok:
+            target_dir = output_root / folder
+            dest = target_dir / f"{aweme.aweme_id}_{safe_title(aweme.desc) or aweme.aweme_id}.mp4"
+            plays = play_url_candidates(raw) or [aweme.medias[0].url]
+            err = error or "TikTok 媒体下载失败"
+            async with lock:
+                for play in plays:
+                    err = await download_tt_url(browser, identity, play, dest)
+                    if not err:
+                        ok = True
+                        break
+            if not ok:
+                warnings.append(f"第 {n} 集下载失败: {error or err}")
+                continue
+        if save_metadata:
+            target_dir = output_root / folder
+            info_path = target_dir / f"{aweme.aweme_id}_{safe_title(aweme.desc) or aweme.aweme_id}.info.json"
+            info_path.parent.mkdir(parents=True, exist_ok=True)
+            info_path.write_text(
+                json.dumps({
+                    **metadata,
+                    "id": aweme.aweme_id,
+                    "title": aweme.desc,
+                    "episode": n,
+                    "media": [{"url": m.url, "kind": m.kind} for m in aweme.medias],
+                }, ensure_ascii=False, indent=2, default=str),
+                encoding="utf-8",
+            )
+        saved_ids.append(aweme.aweme_id)
+    target_dir = output_root / folder
+    files = []
+    if target_dir.is_dir():
+        for path in sorted(target_dir.iterdir()):
+            if not path.is_file() or path.suffix.lower() in {".part", ".ytdl"}:
+                continue
+            if not any(path.name.startswith(vid + "_") for vid in saved_ids):
+                continue
+            files.append({
+                "name": path.name,
+                "path": str(path.resolve()),
+                "relative_path": path.relative_to(output_root).as_posix(),
+                "size": path.stat().st_size,
+                "role": _share_file_role(path),
+            })
+    if not any(item["role"] == "media" for item in files):
+        raise ShareDownloadError("短剧各集都没有下载成功。" + (" ".join(warnings) if warnings else ""))
+    return {
+        "ok": True,
+        "job_id": f"tiktok_drama_{series_id or title}",
+        "url": source_url,
+        "output_dir": str(target_dir.resolve()),
+        "metadata": metadata,
+        "files": files,
+        "progress": {"status": "finished"},
+        "warnings": warnings,
+    }
+
+
+async def _tiktok_native_share(
+    source_url: str,
+    *,
+    account_id: int | None,
+    output_root: Path,
+    quality: str,
+    should_download: bool,
+    save_metadata: bool,
+    save_thumbnail: bool,
+    proxy: str,
+    user_agent: str,
+    required: bool = False,
+    progress_id: str = "",
+) -> dict | None:
+    """yt-dlp 公开接口常被 TikTok IP/地区风控;用已登录账号浏览器拦截 playAddr。"""
+    shortdrama = is_tiktok_shortdrama(source_url)
+    if browser is None:
+        if required or shortdrama:
+            raise ShareDownloadError("浏览器未启动，无法用 TikTok 账号登录态下载")
+        return None
+    identity = None
+    account_proxy = ""
+    if account_id is not None:
+        with get_session() as s:
+            account = s.get(DouyinAccount, account_id)
+            if account and account.platform == "tiktok":
+                identity = browser.identity_for(account)
+                account_proxy = (account.proxy or "").strip()
+    if identity is None:
+        if shortdrama or required:
+            raise ShareDownloadError(
+                "TikTok 拒绝了未登录或当前出口 IP 的访问。"
+                "请在「复用账号登录态」里选择一个已登录的 TikTok 账号后再下载"
+            )
+        return None
+    use_proxy = (proxy or "").strip() or account_proxy
+    lock = browser.lock_for(f"acc:{account_id}")
+    if shortdrama:
+        return await _tiktok_drama_share(
+            source_url,
+            identity=identity,
+            account_id=account_id,
+            output_root=output_root,
+            quality=quality,
+            should_download=should_download,
+            save_metadata=save_metadata,
+            save_thumbnail=save_thumbnail,
+            use_proxy=use_proxy,
+            user_agent=user_agent,
+            lock=lock,
+            progress_id=progress_id,
+        )
+    async with lock:
+        try:
+            raw = await fetch_tt_video_detail(browser, identity, source_url)
+        except Exception as exc:
+            print(f"[share] tt browser detail failed: {exc!r}", flush=True)
+            raw = None
+        try:
+            await _refresh_share_cookies(identity, account_id, "")
+        except Exception as exc:
+            print(f"[share] tt refresh cookies failed: {exc!r}", flush=True)
+    if not raw:
+        if shortdrama or required:
+            raise ShareDownloadError(
+                "已打开所选 TikTok 账号，但未能读取该作品/短剧的播放地址；"
+                "请检查登录态、账号代理地区，或重新登录后再试"
+            )
+        return None
+    aweme = parse_tt_play_hit(
+        raw, quality=quality if quality != "audio" else "highest",
+    )
+    if not aweme:
+        if shortdrama or required:
+            raise ShareDownloadError("TikTok 作品详情已读取，但没有找到可下载的视频")
+        return None
+    if quality == "audio" and aweme.media_type == "video":
+        return None
+
+    metadata = {
+        **_native_aweme_metadata(aweme, source_url),
+        "extractor": "creatorhub:tiktok",
+        "extractor_key": "CreatorHubTikTok",
+        "platform": "tiktok",
+    }
+    if not should_download:
+        return {
+            "ok": True,
+            "url": source_url,
+            "metadata": metadata,
+            "warnings": [],
+        }
+
+    downloader = Downloader(
+        str(output_root),
+        user_agent,
+        timeout=max(30.0, cfg.engine.request_timeout_seconds),
+    )
+    ok, _local_path, error = await downloader.download_aweme(
+        aweme, base_dir=str(output_root), proxy=use_proxy
+    )
+    if not ok:
+        target_dir = output_root / safe_title(aweme.author_name or "unknown")
+        title = safe_title(aweme.desc) or aweme.aweme_id
+        dest = target_dir / f"{aweme.aweme_id}_{title}.mp4"
+        print(f"[share] tt httpx download failed ({error}), retry via browser", flush=True)
+        from .platforms.tiktok import play_url_candidates
+        plays = play_url_candidates(raw) or [aweme.medias[0].url]
+        err = error or "TikTok 媒体下载失败"
+        async with lock:
+            for play in plays:
+                err = await download_tt_url(browser, identity, play, dest)
+                if not err:
+                    break
+        if err:
+            raise ShareDownloadError(error or err or "TikTok 媒体下载失败")
+
+    target_dir = output_root / safe_title(aweme.author_name or "unknown")
+    title = safe_title(aweme.desc) or aweme.aweme_id
+    if save_metadata:
+        info_path = target_dir / f"{aweme.aweme_id}_{title}.info.json"
+        payload = {
+            **metadata,
+            "media": [
+                {"url": media.url, "kind": media.kind, "ext": media.ext,
+                 "index": media.index}
+                for media in aweme.medias
+            ],
+            "raw": {k: v for k, v in raw.items() if k != "play_url"} | {
+                "play_url": (raw.get("play_url") or "")[:180],
+            },
+        }
+        info_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2, default=str),
+            encoding="utf-8",
+        )
+    if save_thumbnail and aweme.media_type == "video" and aweme.cover:
+        import httpx
+        from .browser.manager import normalize_proxy
+
+        cover_path = target_dir / f"{aweme.aweme_id}_{title}.cover.jpg"
+        headers = {"User-Agent": user_agent, "Referer": "https://www.tiktok.com/"}
+        try:
+            async with httpx.AsyncClient(
+                timeout=max(30.0, cfg.engine.request_timeout_seconds),
+                follow_redirects=True,
+                headers=headers,
+                proxy=normalize_proxy(use_proxy) or None,
+            ) as http:
+                await downloader._download_one(http, aweme.cover, cover_path)
+        except Exception:
+            pass
+
+    files = []
+    for path in sorted(target_dir.glob(f"{aweme.aweme_id}_*")):
+        if not path.is_file() or path.suffix.lower() in {".part", ".ytdl"}:
+            continue
+        files.append({
+            "name": path.name,
+            "path": str(path.resolve()),
+            "relative_path": path.relative_to(output_root).as_posix(),
+            "size": path.stat().st_size,
+            "role": _share_file_role(path),
+        })
+    if not any(item["role"] == "media" for item in files):
+        raise ShareDownloadError("TikTok 作品解析成功，但本地没有生成媒体文件")
+    return {
+        "ok": True,
+        "job_id": f"tiktok_{aweme.aweme_id}",
+        "url": source_url,
+        "output_dir": str(target_dir.resolve()),
+        "metadata": metadata,
+        "files": files,
+        "progress": {"status": "finished"},
+        "warnings": [],
+    }
+
+
 @app.post("/api/share-download/links")
 async def parse_share_links(body: ShareLinksIn):
     """只做本地文本清洗和链接提取，不访问分享站点。"""
@@ -2565,6 +2938,15 @@ async def parse_share_links(body: ShareLinksIn):
         "links": [item.to_dict() for item in links],
         "count": len(links),
     }
+
+
+@app.get("/api/share-download/progress/{progress_id}")
+async def share_download_progress(progress_id: str):
+    pid = _share_progress_id(progress_id)
+    row = _SHARE_PROGRESS.get(pid) if pid else None
+    if not row:
+        return {"ok": False, "status": "idle", "current": 0, "total": 0, "message": ""}
+    return {"ok": True, **row}
 
 
 @app.post("/api/share-download")
@@ -2595,6 +2977,7 @@ async def share_download(body: ShareDownloadIn):
         raise HTTPException(400, f"下载目录不可用：{exc}")
 
     cookie_file = ""
+    _share_progress_set(body.progress_id, message="正在准备下载…", status="running", current=0, total=0)
     try:
         cookie_file, account_proxy, account_ua = _write_account_cookie_file(body.account_id)
         proxy = body.proxy.strip() or account_proxy
@@ -2634,6 +3017,63 @@ async def share_download(body: ShareDownloadIn):
                             proxy=proxy,
                             user_agent=user_agent,
                         )
+                    elif link.platform == "tiktok":
+                        if is_tiktok_shortdrama(link.url):
+                            item = await _tiktok_native_share(
+                                link.url,
+                                account_id=body.account_id,
+                                output_root=output_root,
+                                quality=body.quality,
+                                should_download=body.download,
+                                save_metadata=body.save_metadata,
+                                save_thumbnail=body.save_thumbnail,
+                                proxy=proxy,
+                                user_agent=user_agent,
+                                required=True,
+                                progress_id=body.progress_id,
+                            )
+                        elif body.account_id:
+                            try:
+                                if body.download:
+                                    item = await downloader.download(
+                                        link.url,
+                                        quality=body.quality,
+                                        save_metadata=body.save_metadata,
+                                        save_thumbnail=body.save_thumbnail,
+                                        save_subtitles=body.save_subtitles,
+                                        proxy=proxy,
+                                        cookie_file=cookie_file,
+                                        max_filesize_mb=body.max_filesize_mb,
+                                    )
+                                else:
+                                    item = await downloader.inspect(
+                                        link.url, proxy=proxy, cookie_file=cookie_file
+                                    )
+                            except ShareDownloadError as exc:
+                                msg = str(exc)
+                                low = msg.lower()
+                                if (
+                                    "ip address is blocked" in low
+                                    or "拒绝了当前 ip" in low
+                                    or "地区限制" in msg
+                                ):
+                                    print("[share] tiktok ytdlp blocked, try browser",
+                                          flush=True)
+                                    item = await _tiktok_native_share(
+                                        link.url,
+                                        account_id=body.account_id,
+                                        output_root=output_root,
+                                        quality=body.quality,
+                                        should_download=body.download,
+                                        save_metadata=body.save_metadata,
+                                        save_thumbnail=body.save_thumbnail,
+                                        proxy=proxy,
+                                        user_agent=user_agent,
+                                        required=True,
+                                        progress_id=body.progress_id,
+                                    )
+                                else:
+                                    raise
                     if item is not None:
                         pass
                     elif body.download:
@@ -2658,6 +3098,14 @@ async def share_download(body: ShareDownloadIn):
                         "url": link.url,
                         "input_platform": link.platform,
                         "error": str(exc),
+                    }
+                except Exception as exc:
+                    traceback.print_exc()
+                    item = {
+                        "ok": False,
+                        "url": link.url,
+                        "input_platform": link.platform,
+                        "error": f"下载过程出错：{exc}",
                     }
                 if body.download:
                     try:
@@ -3944,13 +4392,21 @@ class RepostIn(BaseModel):
 
 
 _REPOST_PF_NAME = {
-    "xhs": "小红书", "douyin": "抖音", "shipinhao": "视频号",
-    "youtube": "YouTube", "tiktok": "TikTok",
+    "xhs": "小红书", "douyin": "抖音", "kuaishou": "快手",
+    "shipinhao": "视频号", "youtube": "YouTube", "tiktok": "TikTok",
+}
+_REPOST_BROWSER_PF = ("douyin", "kuaishou", "shipinhao", "youtube", "tiktok")
+_REPOST_LOGIN_ACTION = {
+    "shipinhao": "视频号登录",
+    "youtube": "YouTube 登录",
+    "tiktok": "TikTok 登录",
+    "douyin": "创作者登录",
+    "kuaishou": "快手扫码或创作者登录",
 }
 
 
 async def _repost_content(cid: int, body: RepostIn, target_platform: str):
-    """把已下载作品转成目标平台(xhs / douyin / shipinhao / youtube)的发布任务。"""
+    """把已下载作品转成目标平台的发布任务。"""
     if not engine:
         raise HTTPException(503, "引擎未就绪")
     if target_platform not in _REPOST_PF_NAME:
@@ -3968,15 +4424,9 @@ async def _repost_content(cid: int, body: RepostIn, target_platform: str):
         pname = _REPOST_PF_NAME[target_platform]
         if not acc or acc.platform != target_platform:
             raise HTTPException(400, f"请选择一个已登录的{pname}账号")
-        if target_platform in ("douyin", "shipinhao", "youtube", "tiktok"):
-            # 浏览器自动化发布:有任一持久登录态即可
+        if target_platform in _REPOST_BROWSER_PF:
             if not (acc.creator_storage_state or acc.storage_state):
-                action = {
-                    "shipinhao": "视频号登录",
-                    "youtube": "YouTube 登录",
-                    "tiktok": "TikTok 登录",
-                    "douyin": "创作者登录",
-                }[target_platform]
+                action = _REPOST_LOGIN_ACTION[target_platform]
                 raise HTTPException(400, f"该{pname}账号不可发布:请先在账号页完成「{action}」")
         elif not (acc.creator_storage_state or has_creator_cookies(acc.storage_state)):
             raise HTTPException(400, "该账号不可发布:请对该号完成「小红书扫码登录」或「创作者登录」")
@@ -4030,6 +4480,12 @@ async def repost_to_tiktok(cid: int, body: RepostIn):
     return await _repost_content(cid, body, "tiktok")
 
 
+@app.post("/api/contents/{cid}/repost-kuaishou")
+async def repost_to_kuaishou(cid: int, body: RepostIn):
+    """把一条已下载的作品转成快手创作平台发布任务。"""
+    return await _repost_content(cid, body, "kuaishou")
+
+
 async def _repost_share_history(record_id: int, body: RepostIn, target_platform: str):
     if not engine:
         raise HTTPException(503, "引擎未就绪")
@@ -4051,14 +4507,9 @@ async def _repost_share_history(record_id: int, body: RepostIn, target_platform:
         pname = _REPOST_PF_NAME[target_platform]
         if not acc or acc.platform != target_platform:
             raise HTTPException(400, f"请选择一个已登录的{pname}账号")
-        if target_platform in ("douyin", "shipinhao", "youtube", "tiktok"):
+        if target_platform in _REPOST_BROWSER_PF:
             if not (acc.creator_storage_state or acc.storage_state):
-                action = {
-                    "shipinhao": "视频号登录",
-                    "youtube": "YouTube 登录",
-                    "tiktok": "TikTok 登录",
-                    "douyin": "创作者登录",
-                }[target_platform]
+                action = _REPOST_LOGIN_ACTION[target_platform]
                 raise HTTPException(400, f"该{pname}账号不可发布:请先在账号页完成「{action}」")
         elif not (acc.creator_storage_state or has_creator_cookies(acc.storage_state)):
             raise HTTPException(400, "该账号不可发布:请对该号完成「小红书扫码登录」或「创作者登录」")
@@ -4116,6 +4567,11 @@ async def repost_share_to_youtube(record_id: int, body: RepostIn):
 @app.post("/api/share-download/history/{record_id}/repost-tiktok")
 async def repost_share_to_tiktok(record_id: int, body: RepostIn):
     return await _repost_share_history(record_id, body, "tiktok")
+
+
+@app.post("/api/share-download/history/{record_id}/repost-kuaishou")
+async def repost_share_to_kuaishou(record_id: int, body: RepostIn):
+    return await _repost_share_history(record_id, body, "kuaishou")
 
 # ─────────── 自动评论(规则 + 任务)───────────
 class CommentRuleIn(BaseModel):

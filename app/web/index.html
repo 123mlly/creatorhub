@@ -649,6 +649,31 @@
   td.num { font-family:var(--mono); font-size:12.5px; }
   .acttd { text-align:right; white-space:nowrap; }
   .acttd button { margin-left:4px; }
+  .table-wrap.ops-fixed { container-type:inline-size; }
+  .table-wrap.ops-fixed > table { border-collapse:separate; border-spacing:0; }
+  .table-wrap.ops-fixed > table > thead th.acttd,
+  .table-wrap.ops-fixed > table > tbody > tr > td.acttd {
+    position:sticky; right:0; z-index:2; background:var(--surface);
+    box-shadow:-12px 0 12px -14px rgba(0,0,0,.7);
+  }
+  .table-wrap.ops-fixed > table > thead th.acttd { z-index:3; background:var(--surface-2); }
+  .table-wrap.ops-fixed > table > tbody > tr:hover > td.acttd { background:var(--surface-2); }
+  td.share-files-cell { padding:0; background:var(--bg); }
+  .share-files-wrap {
+    position:sticky; left:0; width:100cqi; max-width:100cqi;
+    background:var(--bg); border-top:1px solid var(--line);
+  }
+  .share-files-scroll { max-height:320px; overflow:auto; }
+  .share-files-head-stick { position:sticky; top:0; z-index:2; background:var(--surface-2); }
+  .share-files-table { width:100%; border-collapse:separate; border-spacing:0; table-layout:fixed; }
+  .share-files-table th, .share-files-table td { padding:8px 12px; background:transparent; }
+  .share-files-table tr.share-files-head th { background:var(--surface-2); }
+  .share-files-table .share-ep-no { width:88px; color:var(--mut); }
+  .share-files-table .share-ep-size { width:88px; text-align:right; font-family:var(--mono); font-size:12px; color:var(--mut); }
+  .share-files-table .share-ep-name { overflow:hidden; text-overflow:ellipsis; }
+  .share-files-table .share-ep-act { width:196px; text-align:right; white-space:nowrap; }
+  .share-files-table .share-ep-act button { margin-left:4px; }
+  .share-files-table tbody tr:hover td { background:var(--surface-2); }
   .local-path-cell { width:220px; min-width:200px; max-width:240px; }
   .local-path { display:grid; grid-template-columns:minmax(0,1fr) 28px; align-items:center; gap:8px; min-width:0; }
   .local-path-info { min-width:0; }
@@ -1498,8 +1523,8 @@
         <h2>下载历史 <span class="sub" id="sd-history-count">0 条</span></h2>
         <button class="ghost sm" onclick="refreshShareHistory()"><svg><use href="#i-clock"/></svg>刷新</button>
       </div>
-      <div class="table-wrap"><table><thead><tr>
-        <th>下载时间</th><th>平台</th><th>作品</th><th>媒体/文件</th><th>状态</th><th>保存目录</th><th>操作</th>
+      <div class="table-wrap ops-fixed"><table><thead><tr>
+        <th>下载时间</th><th>平台</th><th>作品</th><th>媒体/文件</th><th>状态</th><th>保存目录</th><th class="acttd">操作</th>
       </tr></thead><tbody id="sd-history-body"></tbody></table></div>
     </div>
   </section>

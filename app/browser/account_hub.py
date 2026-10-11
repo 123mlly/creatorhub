@@ -218,9 +218,24 @@ def _norm_youtube_work(it: dict) -> Optional[dict]:
 
 
 def _norm_tiktok_work(it: dict) -> Optional[dict]:
-    """yt-dlp TikTok 条目 → AccountWork 字段。"""
+    """TikTok 条目(浏览器 itemStruct 或 yt-dlp) → AccountWork 字段。"""
     if not isinstance(it, dict):
         return None
+    hit = it.get("_hit")
+    if isinstance(hit, dict) and hit.get("id"):
+        return {
+            "item_id": str(hit["id"]),
+            "desc": str(hit.get("title") or hit["id"]),
+            "media_type": "video",
+            "cover_url": str(hit.get("cover") or ""),
+            "create_time": _num(hit.get("create_time")),
+            "like_count": _num(hit.get("like_count")),
+            "comment_count": _num(hit.get("comment_count")),
+            "collect_count": 0,
+            "share_count": 0,
+            "play_count": 0,
+            "status": "",
+        }
     vid = (it.get("id") or "").strip()
     if not vid and it.get("url"):
         from ..platforms.tiktok import resolve_tiktok_video_id
@@ -301,7 +316,8 @@ async def fetch_account_works(mgr: BrowserManager, identity, platform: str, uid:
     if platform == "youtube":
         return await _fetch_youtube_account_works(identity, uid, max_scrolls=max_scrolls)
     if platform == "tiktok":
-        return await _fetch_tiktok_account_works(identity, uid, max_scrolls=max_scrolls)
+        return await _fetch_tiktok_account_works(
+            mgr, identity, uid, max_scrolls=max_scrolls)
     if platform == "xhs":
         # 小红书:站内「我」入口拿真实主页链接(带 xsec_token);失败再退回 uid 直开
         open_url, self_uid = await _self_profile_link(mgr, identity, "xhs")
@@ -398,12 +414,12 @@ async def _fetch_youtube_account_works(identity, uid: str,
     return out, ("" if out else (err or "未抓到作品"))
 
 
-async def _fetch_tiktok_account_works(identity, uid: str,
+async def _fetch_tiktok_account_works(mgr, identity, uid: str,
                                       max_scrolls: int = 14) -> Tuple[List[dict], str]:
-    """TikTok 本账号作品:yt-dlp 拉自己的 @handle。"""
+    """TikTok 本账号作品:用登录浏览器打开自己的主页拦截 item_list。"""
     from ..db import get_session
     from ..models import DouyinAccount
-    from ..platforms.tiktok import fetch_tiktok_videos
+    from ..platforms.tiktok import fetch_tt_user_videos, fetch_tiktok_videos
 
     state, proxy, user_ref = "", "", (uid or "").strip()
     if identity and identity.account_id is not None:
@@ -415,9 +431,17 @@ async def _fetch_tiktok_account_works(identity, uid: str,
                 user_ref = (acc.douyin_id or acc.sec_uid or user_ref or "").strip()
     if not user_ref:
         return [], "missing_uid:账号缺 @handle,请先点账号「刷新资料」再同步作品"
-    limit = max(10, min(int(max_scrolls or 14) * 5, 50))
-    entries, author, err = await fetch_tiktok_videos(
-        user_ref, known_ids=set(), limit=limit, proxy=proxy, state_json=state)
+    entries, author, err = await fetch_tt_user_videos(
+        mgr, identity, user_ref, set(),
+        max_scrolls=max(2, min(int(max_scrolls or 14), 16)))
+    if not entries and err and not str(err).startswith("logged_out"):
+        limit = max(10, min(int(max_scrolls or 14) * 5, 50))
+        fb, author2, err2 = await fetch_tiktok_videos(
+            user_ref, known_ids=set(), limit=limit, proxy=proxy, state_json=state)
+        if fb:
+            entries, author, err = fb, author2 or author, ""
+        elif err2:
+            err = err or err2
     out = [w for w in (_norm_tiktok_work(it) for it in (entries or [])) if w]
     if author and identity and identity.account_id is not None:
         try:

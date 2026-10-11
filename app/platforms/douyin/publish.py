@@ -34,9 +34,78 @@ _DESC_SEL = ['.editor-kit-editor-container [contenteditable="true"]',
              'div[data-placeholder*="简介"]', 'div[data-placeholder*="作品"]',
              'div[contenteditable="true"]', '.zone-container',
              'textarea[placeholder*="简介"]', 'textarea']
-# 最终提交按钮(排除「定时发布」等干扰,后面再按 enabled + 文本精确过滤)
-_PUBLISH_BTN = ['button:has-text("发布")', 'button:has-text("发布作品")',
+# 精确文案;不要 has-text("发布"),会点到「发布图文」tab / 侧栏。
+_PUBLISH_LABELS = ("发布", "立即发布", "确认发布", "发布作品")
+_PUBLISH_BTN = ['button[class*="primary"]:has-text("发布")',
                 'div[class*="content-confirm"] button', '.publish-btn button', '.button-publish']
+
+# 底部主按钮常在视口外,或是 Semi/自定义节点而非 <button>。
+_FIND_PUBLISH_JS = """() => {
+  const labels = new Set(['发布', '立即发布', '确认发布', '发布作品']);
+  const hits = [];
+  const nodes = document.querySelectorAll('button, [role="button"], a, div, span');
+  for (const el of nodes) {
+    const t = ((el.innerText || el.textContent || '').trim()).replace(/\\s+/g, '');
+    if (!labels.has(t)) continue;
+    if (el.children && el.children.length > 4) continue;
+    const r = el.getBoundingClientRect();
+    if (r.width < 40 || r.height < 18) continue;
+    const st = getComputedStyle(el);
+    if (st.display === 'none' || st.visibility === 'hidden' || Number(st.opacity) === 0)
+      continue;
+    const cls = (el.className || '').toString();
+    const disabled = !!(el.disabled
+      || el.getAttribute('aria-disabled') === 'true'
+      || /(?:^|[\\s_-])disabled(?:[\\s_-]|$)/i.test(cls));
+    const bg = st.backgroundColor || '';
+    const primaryBg = /rgb\\(\\s*(2[0-4]\\d|255)\\s*,/.test(bg);
+    hits.push({
+      t, tag: el.tagName, cls: cls.slice(0, 90), disabled, primaryBg,
+      y: Math.round(r.y), x: Math.round(r.x),
+      w: Math.round(r.width), h: Math.round(r.height),
+      primary: /semi-button-primary|button-primary|ant-btn-primary|publish/i.test(cls)
+        || primaryBg,
+    });
+  }
+  hits.sort((a, b) => (Number(b.primary) - Number(a.primary)) || (b.y - a.y));
+  return hits.slice(0, 24);
+}"""
+
+_CLICK_PUBLISH_JS = """() => {
+  const labels = new Set(['发布', '立即发布', '确认发布', '发布作品']);
+  let best = null;
+  let bestScore = -1e9;
+  const nodes = document.querySelectorAll('button, [role="button"], a, div, span');
+  for (const el of nodes) {
+    const t = ((el.innerText || el.textContent || '').trim()).replace(/\\s+/g, '');
+    if (!labels.has(t)) continue;
+    if (el.children && el.children.length > 4) continue;
+    const r = el.getBoundingClientRect();
+    if (r.width < 40 || r.height < 18) continue;
+    const st = getComputedStyle(el);
+    if (st.display === 'none' || st.visibility === 'hidden') continue;
+    const cls = (el.className || '').toString();
+    const disabled = !!(el.disabled
+      || el.getAttribute('aria-disabled') === 'true'
+      || /(?:^|[\\s_-])disabled(?:[\\s_-]|$)/i.test(cls));
+    if (disabled) continue;
+    const primaryBg = /rgb\\(\\s*(2[0-4]\\d|255)\\s*,/.test(st.backgroundColor || '');
+    const primary = /semi-button-primary|button-primary|ant-btn-primary/i.test(cls)
+      || primaryBg;
+    const score = (primary ? 10000 : 0) + r.y + (r.width > 70 ? 20 : 0);
+    if (score >= bestScore) { bestScore = score; best = el; }
+  }
+  if (!best) return '';
+  best.scrollIntoView({ block: 'center', inline: 'nearest' });
+  const ev = { bubbles: true, cancelable: true, view: window };
+  best.dispatchEvent(new PointerEvent('pointerdown', ev));
+  best.dispatchEvent(new MouseEvent('mousedown', ev));
+  best.dispatchEvent(new PointerEvent('pointerup', ev));
+  best.dispatchEvent(new MouseEvent('mouseup', ev));
+  best.dispatchEvent(new MouseEvent('click', ev));
+  try { best.click(); } catch (e) {}
+  return ((best.innerText || '').trim() + '|' + (best.className || '').toString()).slice(0, 80);
+}"""
 
 _DEBUG_DIR = Path("./data/debug")
 
@@ -125,10 +194,49 @@ async def _wait_editor(page, timeout_ms: int) -> bool:
     return False
 
 
-async def _primary_publish_button(page):
-    """挑最终「发布」按钮:文本恰为发布/发布作品、可见、可用;取最后一个(表单底部)。"""
+async def _js_click_publish(page) -> str:
     try:
-        btns = page.locator('button')
+        return str(await page.evaluate(_CLICK_PUBLISH_JS) or "")
+    except Exception as e:
+        _log(f"JS 点击失败: {e!r}")
+        return ""
+
+
+async def _playwright_click_publish(page) -> bool:
+    """精确点底部「发布」,避开「发布图文」tab。不依赖 is_visible(视口外会漏)。"""
+    for loc in (
+        page.get_by_role("button", name="发布", exact=True),
+        page.get_by_text("发布", exact=True),
+        page.get_by_role("button", name="发布作品", exact=True),
+    ):
+        try:
+            n = await loc.count()
+        except Exception:
+            continue
+        for i in range(n - 1, -1, -1):
+            b = loc.nth(i)
+            try:
+                t = ((await b.inner_text()) or "").strip().replace("\n", "")
+                if t not in _PUBLISH_LABELS:
+                    continue
+                try:
+                    if not await b.is_enabled():
+                        continue
+                except Exception:
+                    pass
+                await b.scroll_into_view_if_needed(timeout=2000)
+                await b.click(timeout=2500, force=True)
+                _log("Playwright 已点「发布」")
+                return True
+            except Exception:
+                continue
+    return False
+
+
+async def _primary_publish_button(page):
+    """挑最终「发布」按钮:精确文案、可用;不因视口外而跳过。取最后一个(表单底部)。"""
+    try:
+        btns = page.locator('button, [role="button"]')
         n = await btns.count()
     except Exception:
         return None
@@ -136,11 +244,10 @@ async def _primary_publish_button(page):
     for i in range(n):
         b = btns.nth(i)
         try:
-            if not await b.is_visible():
+            t = ((await b.inner_text()) or "").strip().replace("\n", "")
+            if t not in _PUBLISH_LABELS:
                 continue
-            t = ((await b.inner_text()) or "").strip()
-            if t in ("发布", "发布作品", "发布视频", "发布图文"):
-                cand = b   # 页面里可能多个,取靠后的(底部提交)
+            cand = b
         except Exception:
             continue
     return cand
@@ -283,32 +390,45 @@ async def publish_douyin(mgr: BrowserManager, identity: Identity,
         await _apply_publish_settings(page, visibility, allow_save)
         await page.wait_for_timeout(600)
 
-        # 轮询等「发布」按钮可用(视频未处理完时按钮 disabled),最多 ~90s
-        btn = None
-        for _ in range(45):
+        # 轮询等「发布」可用(转码未完常 disabled),视口外/非 button 走 JS 点击
+        clicked = ""
+        for i in range(45):
+            try:
+                await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            except Exception:
+                pass
+            if i in (0, 3, 8):
+                try:
+                    _log(f"发布候选 {await page.evaluate(_FIND_PUBLISH_JS)}")
+                except Exception as e:
+                    _log(f"枚举失败 {e!r}")
+            if await _playwright_click_publish(page):
+                clicked = "pw"
+                break
+            clicked = await _js_click_publish(page)
+            if clicked:
+                _log(f"已自动点击发布 {clicked}")
+                break
             btn = await _primary_publish_button(page)
             if btn is not None:
                 try:
+                    await btn.scroll_into_view_if_needed(timeout=2000)
                     if await btn.is_enabled():
+                        await btn.click(timeout=4000, force=True)
+                        clicked = "legacy"
+                        _log("已点击发布按钮")
                         break
                 except Exception:
-                    break
+                    pass
+            if i in (0, 4, 10, 44):
+                _log(f"发布按钮仍未点到 i={i}/45")
             await page.wait_for_timeout(2000)
-        if btn is None:
-            await _dump(page, "nobtn")
-            return False, "", "未找到发布按钮(发布页可能改版)。已存诊断截图到 data/debug/。"
-        try:
-            await btn.scroll_into_view_if_needed(timeout=3000)
-        except Exception:
-            pass
-        try:
-            await btn.click(timeout=5000)
-            _log("已点击发布按钮")
-        except Exception:
-            # 兜底:用文本选择器再点一次
+        if not clicked:
             if not await _click_first(page, _PUBLISH_BTN, timeout=4000):
-                await _dump(page, "clickfail")
-                return False, "", "发布按钮点击失败(可能被弹层遮挡/需补封面)。已存诊断截图。"
+                await _dump(page, "nobtn")
+                return False, "", "未找到可点击的发布按钮(视频可能仍在转码,或发布页改版)。已存诊断截图。"
+            clicked = "css"
+            _log("已用 CSS 兜底点击发布")
 
         # 成功判定 + 风控验证等待:抖音点发布后常弹「短信验证码/扫码」要本人操作,
         # 这时必须把弹出的窗口留给用户手动完成,故轮询等待、给足时间(默认最多 5 分钟)。

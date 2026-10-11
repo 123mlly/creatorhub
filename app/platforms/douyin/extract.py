@@ -29,6 +29,7 @@ class Aweme:
     duration: int = 0           # 秒
     avatar: str = ""            # 作者头像
     platform: str = "douyin"    # douyin | xhs(决定下载时的 Referer)
+    author_id: str = ""         # TikTok uniqueId,用于拼 /@handle/video/
 
 
 def _first_http(urls) -> Optional[str]:

@@ -593,7 +593,7 @@ function applyMonitorForm() {
     return;
   }
   if (PLATFORM === "tiktok") {
-    if (title) title.innerHTML = '添加用户监控 <span class="sub">监控并下载新视频(yt-dlp)</span>';
+    if (title) title.innerHTML = '添加用户监控 <span class="sub">监控并下载新视频</span>';
     if (lbl) lbl.textContent = "主页链接 / @handle";
     $("t-url").placeholder = "粘贴 tiktok.com/@xxx 或 @handle";
     return;
@@ -2232,9 +2232,11 @@ function filterShareAccounts() {
   const platformLabel = PF_NAME[platform] || platform || "";
   const emptyLabel = !hasDetectedLink
     ? "先识别链接，再选择对应平台账号"
-    : knownAccountPlatform
-      ? `不使用${platformLabel}账号登录态`
-      : "该链接无需或暂无可复用账号";
+    : platform === "tiktok"
+      ? `请选择已登录的${platformLabel}账号（短剧/地区限制必选）`
+      : knownAccountPlatform
+        ? `不使用${platformLabel}账号登录态`
+        : "该链接无需或暂无可复用账号";
   sel.innerHTML =
     `<option value="">${esc(emptyLabel)}</option>` +
     rows.map(a =>
@@ -2247,6 +2249,7 @@ function filterShareAccounts() {
     // 已识别为具体平台且只有一个可用账号时直接选中，图文下载无需用户再手选。
     const active = rows.filter(a => a.status !== "invalid");
     if (knownAccountPlatform && active.length === 1) sel.value = String(active[0].id);
+    else if (platform === "tiktok" && active.length) sel.value = String(active[0].id);
   }
   csSyncAll();
 }
@@ -2320,7 +2323,7 @@ function uiMetaPrompt({ title, item }) {
   });
 }
 
-function shareRequestBody(download) {
+function shareRequestBody(download, progressId) {
   const text = $("sd-text").value.trim();
   const maxSize = Number($("sd-max-size").value || 0);
   const accountId = Number($("sd-account").value || 0);
@@ -2336,6 +2339,7 @@ function shareRequestBody(download) {
     save_subtitles: $("sd-subtitles").checked,
     max_filesize_mb: Number.isFinite(maxSize) && maxSize > 0 ? Math.floor(maxSize) : 0,
     account_id: accountId || null,
+    progress_id: progressId || "",
   };
 }
 
@@ -2364,6 +2368,56 @@ function fmtShareHistoryTime(value) {
   return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString();
 }
 
+const SHARE_FILES_OPEN = new Set();
+
+function shareFileOrder(file) {
+  const name = String(file.name || file.relative_path || "");
+  const ep = name.match(/EP(\d{1,3})/i);
+  return ep ? Number(ep[1]) : 10000;
+}
+
+function shareFileLabel(file) {
+  const name = String(file.name || file.relative_path || "");
+  const ep = name.match(/EP(\d{1,3})/i);
+  if (ep) return "第 " + Number(ep[1]) + " 集";
+  return name || "文件";
+}
+
+const SHARE_EP_HINT = {};
+const _SHARE_VIDEO_EXT = new Set([".mp4", ".mkv", ".webm", ".mov", ".flv", ".avi", ".m4v"]);
+const _SHARE_IMAGE_EXT = new Set([".jpg", ".jpeg", ".png", ".webp", ".avif"]);
+
+function shareMediaServerIndex(files) {
+  const extOf = (file) => {
+    const name = String(file.path || file.name || "").toLowerCase();
+    const dot = name.lastIndexOf(".");
+    return dot >= 0 ? name.slice(dot) : "";
+  };
+  const rank = (file) => {
+    const ext = extOf(file);
+    if (_SHARE_VIDEO_EXT.has(ext)) return 0;
+    if (_SHARE_IMAGE_EXT.has(ext)) return 1;
+    return 2;
+  };
+  const ordered = files.filter(file => file && file.role === "media" && file.path)
+    .slice()
+    .sort((a, b) => rank(a) - rank(b) || String(a.name || a.path).toLowerCase().localeCompare(String(b.name || b.path).toLowerCase()));
+  const index = new Map();
+  ordered.forEach((file, i) => index.set(file.path, i));
+  return index;
+}
+
+function toggleShareFiles(id) {
+  const row = $("share-files-" + id);
+  const btn = $("share-files-btn-" + id);
+  if (!row) return;
+  const open = row.style.display === "none";
+  row.style.display = open ? "" : "none";
+  if (open) SHARE_FILES_OPEN.add(Number(id));
+  else SHARE_FILES_OPEN.delete(Number(id));
+  if (btn) btn.textContent = btn.dataset.label || "文件";
+}
+
 async function refreshShareHistory() {
   const body = $("sd-history-body");
   if (!body) return;
@@ -2373,7 +2427,8 @@ async function refreshShareHistory() {
     $("sd-history-count").textContent = `${rows.length} 条`;
     body.innerHTML = rows.map(row => {
       const files = Array.isArray(row.files) ? row.files : [];
-      const mediaFiles = files.filter(file => file.role === "media");
+      const mediaFiles = files.filter(file => file.role === "media")
+        .slice().sort((a, b) => shareFileOrder(a) - shareFileOrder(b) || String(a.name || "").localeCompare(String(b.name || "")));
       const totalSize = files.reduce((sum, file) => sum + Number(file.size || 0), 0);
       const platformName = PF_NAME[row.platform] || (row.platform === "generic" ? "通用站点" : row.platform || "—");
       const typeName = row.media_type === "images" ? "图文" : row.media_type === "video" ? "视频" : (row.media_type || "媒体");
@@ -2382,6 +2437,32 @@ async function refreshShareHistory() {
         : `<span class="pill bare" style="color:var(--danger)" title="${esc(row.error || "")}">失败</span>`;
       const workSub = [row.author, row.item_id ? `ID ${row.item_id}` : ""].filter(Boolean).join(" · ");
       const path = row.output_dir || ((files[0] || {}).path || "");
+      const folder = path ? String(path).split(/[/\\]/).filter(Boolean).pop() : "";
+      const listLabel = mediaFiles.length > 1
+        ? (row.media_type === "images" ? `${mediaFiles.length} 张` : `${mediaFiles.length} 集`)
+        : "";
+      const open = SHARE_FILES_OPEN.has(Number(row.id));
+      const serverIndex = shareMediaServerIndex(files);
+      const epHead = row.media_type === "images" ? "图片" : "集";
+      const fileRows = mediaFiles.map((file, index) => {
+        const label = shareFileLabel(file);
+        const shown = label === String(file.name || file.relative_path || "")
+          ? (row.media_type === "images" ? `第 ${index + 1} 张` : `第 ${index + 1} 个`)
+          : label;
+        const idx = serverIndex.get(file.path);
+        const hint = [row.title, shown].filter(Boolean).join(" ");
+        if (idx != null) SHARE_EP_HINT[Number(row.id) + ":" + idx] = hint;
+        const repost = row.status === "done" && idx != null
+          ? `<button class="ghost sm content-action-primary" onclick="pickShareEpisodeRepost(${Number(row.id)}, '${esc(row.platform || "")}', '${esc(row.media_type || "")}', ${idx})">${ic("i-send")}转发</button>`
+          : "";
+        const fileName = file.name || file.relative_path || "";
+        return `<tr>
+          <td class="share-ep-no">${esc(shown)}</td>
+          <td class="share-ep-name" title="${esc(fileName)}">${esc(fileName)}</td>
+          <td class="share-ep-size">${fmtShareSize(file.size)}</td>
+          <td class="share-ep-act">${repost}<button class="ghost sm" data-path="${esc(file.path || "")}" onclick="copySharePath(this)">复制路径</button></td>
+        </tr>`;
+      }).join("");
       return `<tr>
         <td>${esc(fmtShareHistoryTime(row.created_at))}</td>
         <td>${esc(platformName)}</td>
@@ -2391,15 +2472,18 @@ async function refreshShareHistory() {
         </td>
         <td>${esc(typeName)} · ${mediaFiles.length || row.media_count || 0} 个媒体<br><span class="mut">${files.length} 个文件${totalSize ? ` · ${fmtShareSize(totalSize)}` : ""}</span></td>
         <td>${status}${row.error ? `<div class="mut" style="max-width:220px;white-space:normal;margin-top:4px">${esc(row.error)}</div>` : ""}</td>
-        <td style="white-space:normal;max-width:300px"><code style="overflow-wrap:anywhere">${esc(path || "—")}</code></td>
-        <td>
+        <td style="white-space:normal;max-width:220px">
+          <div title="${esc(path)}">${esc(folder || "—")}</div>
+          ${listLabel ? `<button class="ghost sm" id="share-files-btn-${Number(row.id)}" data-label="${esc(listLabel)}" onclick="toggleShareFiles(${Number(row.id)})">${esc(listLabel)}</button>` : ""}
+        </td>
+        <td class="acttd">
           <div class="row" style="gap:6px;flex-wrap:nowrap">
             ${row.status === "done" ? `<button class="ghost sm content-action-primary" onclick="pickShareRepostTarget(${Number(row.id)}, '${esc(row.platform || "")}', '${esc(row.media_type || "")}')">${ic("i-send")}转发</button>` : ""}
             ${path ? `<button class="ghost sm" data-path="${esc(path)}" onclick="copySharePath(this)">复制路径</button>` : ""}
             <button class="ghost sm danger" onclick="deleteShareHistory(${Number(row.id)})">删除记录</button>
           </div>
         </td>
-      </tr>`;
+      </tr>${listLabel ? `<tr id="share-files-${Number(row.id)}" style="display:${open ? "" : "none"}"><td class="share-files-cell" colspan="7"><div class="share-files-wrap"><div class="share-files-scroll"><div class="share-files-head-stick"><table class="share-files-table"><tr class="share-files-head"><th class="share-ep-no">${esc(epHead)}</th><th>文件</th><th class="share-ep-size">大小</th><th class="share-ep-act"><button class="ghost sm" onclick="toggleShareFiles(${Number(row.id)})">收起</button></th></tr></table></div><table class="share-files-table">${fileRows}</table></div></div></td></tr>` : ""}`;
     }).join("") || empty(7, "暂无下载历史", "i-download", "开始下载后会自动记录；旧下载会从元数据文件补录");
   } catch (e) {
     $("sd-history-count").textContent = "读取失败";
@@ -2471,11 +2555,25 @@ async function runShareDownload(download) {
     if (!parsed || !parsed.count) return;
   }
   $("sd-msg").textContent = download ? "正在解析并下载，较大视频需要等待…" : "正在读取远端作品信息…";
+  const progressId = (crypto.randomUUID && crypto.randomUUID())
+    || ("sd" + Date.now().toString(36) + Math.random().toString(36).slice(2, 10));
+  let stopped = false;
+  const poll = setInterval(async () => {
+    try {
+      const r = await fetch("/api/share-download/progress/" + encodeURIComponent(progressId));
+      if (!r.ok || stopped) return;
+      const p = await r.json();
+      if (stopped || !p || !p.message) return;
+      $("sd-msg").textContent = p.message;
+      const lab = btn && btn.querySelector("span:last-child");
+      if (lab && p.total) lab.textContent = p.current + "/" + p.total;
+    } catch (e) {}
+  }, 1200);
   await withBusy(btn, download ? "下载中" : "读取中", async () => {
     try {
       const response = await api("/api/share-download", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(shareRequestBody(download)),
+        body: JSON.stringify(shareRequestBody(download, progressId)),
       });
       renderShareResult(response, download);
       if (download) refreshShareHistory();
@@ -2490,6 +2588,9 @@ async function runShareDownload(download) {
     } catch (e) {
       $("sd-msg").textContent = "处理失败：" + e.message;
       toast("处理失败：" + e.message, "err", 7000);
+    } finally {
+      stopped = true;
+      clearInterval(poll);
     }
   });
 }
@@ -3431,17 +3532,21 @@ async function _pickXhsAccount(withOff) {
 }
 let REPOST_ID = null;
 let REPOST_SOURCE = "content";       // content | share
-let REPOST_TARGET = "xhs";           // xhs / douyin / shipinhao / youtube / tiktok
-const REPOST_PF_NAME = { xhs: "小红书", douyin: "抖音", shipinhao: "视频号", youtube: "YouTube", tiktok: "TikTok" };
+let REPOST_TARGET = "xhs";           // xhs / douyin / kuaishou / shipinhao / youtube / tiktok
+const REPOST_PF_NAME = {
+  xhs: "小红书", douyin: "抖音", kuaishou: "快手",
+  shipinhao: "视频号", youtube: "YouTube", tiktok: "TikTok",
+};
 function repostTargetOptions(sourcePlatform, mediaType) {
   const options = [];
   if (sourcePlatform !== "xhs") options.push({ value: "xhs", label: "小红书" });
+  if (sourcePlatform !== "douyin") options.push({ value: "douyin", label: "抖音" });
+  if (sourcePlatform !== "kuaishou") options.push({ value: "kuaishou", label: "快手" });
   if (sourcePlatform !== "shipinhao") options.push({ value: "shipinhao", label: "视频号" });
-  if (sourcePlatform === "xhs") options.push({ value: "douyin", label: "抖音" });
   const isVideo = mediaType === "video";
   if (!mediaType || isVideo) {
-    options.push({ value: "youtube", label: "YouTube" });
-    options.push({ value: "tiktok", label: "TikTok" });
+    if (sourcePlatform !== "youtube") options.push({ value: "youtube", label: "YouTube" });
+    if (sourcePlatform !== "tiktok") options.push({ value: "tiktok", label: "TikTok" });
   }
   return options;
 }
@@ -3477,6 +3582,19 @@ async function pickShareRepostTarget(historyId, sourcePlatform, mediaType) {
   if (target === null) return;
   openShareRepost(historyId, target, sourcePlatform, mediaType);
 }
+async function pickShareEpisodeRepost(historyId, sourcePlatform, mediaType, fileIndex) {
+  const options = repostTargetOptions(sourcePlatform, mediaType);
+  if (!options.length) { toast("当前作品没有可转发的目标平台", "err"); return; }
+  const hint = SHARE_EP_HINT[Number(historyId) + ":" + fileIndex] || "";
+  const target = await uiSelect({
+    title: "转发这一集",
+    hint: (hint ? hint + "。 " : "") + "只发布这一集，不会把整部剧一起发出去。",
+    options,
+    value: options[0].value,
+  });
+  if (target === null) return;
+  openShareRepost(historyId, target, sourcePlatform, mediaType, fileIndex);
+}
 async function openRepost(id, target) {
   const rec = CONTENTS.find(r => r.id === id);
   if ((target === "youtube" || target === "tiktok") && rec && rec.media_type !== "video") {
@@ -3495,6 +3613,7 @@ async function openRepost(id, target) {
       youtube: "请先在 YouTube 账号页完成「YouTube 登录」或 Cookie 粘贴",
       tiktok: "请先在 TikTok 账号页完成「TikTok 登录」或 Cookie 粘贴",
       douyin: "请先在抖音账号页完成登录(扫码/创作者/Cookie)",
+      kuaishou: "请先在快手账号页完成「快手扫码」或「创作者登录」",
     }[target] || "请先添加并登录目标平台账号";
     toast(loginHint, "err");
     return;
@@ -3529,7 +3648,7 @@ async function openRepost(id, target) {
   $("repost").style.display = "flex";
   $("rp-title").focus();
 }
-async function openShareRepost(historyId, target, sourcePlatform, mediaType) {
+async function openShareRepost(historyId, target, sourcePlatform, mediaType, fileIndex) {
   if ((target === "youtube" || target === "tiktok") && mediaType && mediaType !== "video") {
     toast((target === "tiktok" ? "TikTok" : "YouTube") + " 目前仅支持转发视频", "err");
     return;
@@ -3545,6 +3664,7 @@ async function openShareRepost(historyId, target, sourcePlatform, mediaType) {
       youtube: "请先在 YouTube 账号页完成「YouTube 登录」或 Cookie 粘贴",
       tiktok: "请先在 TikTok 账号页完成「TikTok 登录」或 Cookie 粘贴",
       douyin: "请先在抖音账号页完成登录(扫码/创作者/Cookie)",
+      kuaishou: "请先在快手账号页完成「快手扫码」或「创作者登录」",
     }[target] || "请先添加并登录目标平台账号";
     toast(loginHint, "err");
     return;
@@ -3559,13 +3679,17 @@ async function openShareRepost(historyId, target, sourcePlatform, mediaType) {
   REPOST_SOURCE = "share";
   REPOST_ID = historyId;
   REPOST_TARGET = target;
+  REPOST_FILE_INDEX = Number.isInteger(fileIndex) ? fileIndex : null;
   const isDy = target === "douyin";
   const isChannels = target === "shipinhao";
   const isYt = target === "youtube";
   const isTt = target === "tiktok";
   const cap = isTt ? 150 : isYt ? 100 : isDy ? 30 : isChannels ? 16 : 20;
   const pname = REPOST_PF_NAME[target] || "小红书";
-  const desc = (mediaInfo && mediaInfo.desc) || "";
+  const episodeHint = REPOST_FILE_INDEX != null
+    ? (SHARE_EP_HINT[Number(historyId) + ":" + REPOST_FILE_INDEX] || "")
+    : "";
+  const desc = episodeHint || (mediaInfo && mediaInfo.desc) || "";
   $("rp-head").textContent = "发" + pname + " · 编辑后推送";
   $("rp-title-label").textContent = `标题(≤${cap} 字)`;
   $("rp-title").maxLength = cap;
@@ -3587,6 +3711,7 @@ async function openShareRepost(historyId, target, sourcePlatform, mediaType) {
   $("repost").style.display = "flex";
   $("rp-title").focus();
 }
+let REPOST_FILE_INDEX = null;  // 分享历史里只转发这一集;null=整条记录
 let RP_MEDIA = [];         // 可编辑图集:[{url, idx}](idx=原始序号,提交时回传)
 let RP_MEDIA_LEN = 0;      // 原始图片总数(判断是否被编辑过)
 let RP_IS_VIDEO = false;
@@ -3619,11 +3744,14 @@ async function renderRepostThumbs(id) {
     if (REPOST_ID !== id) return;   // 弹窗已切换/关闭
     const vid = (d.medias || []).find(m => m.kind === "video");
     const isVideo = d.media_type === "video" || d.media_type === "live";
-    if (isVideo && (d.local_url || vid)) {
+    if (isVideo && (d.local_url || vid || (REPOST_SOURCE === "share" && REPOST_FILE_INDEX != null))) {
       RP_IS_VIDEO = true;
       if (REPOST_SOURCE === "share") {
-        const thumb = (d.cover_url || "").trim() || d.local_url || (vid && vid.url) || "";
-        const localUrl = d.local_url || (vid && vid.url) || "";
+        const oneUrl = REPOST_FILE_INDEX != null
+          ? "/api/share-download/history/" + id + "/file/" + REPOST_FILE_INDEX
+          : "";
+        const thumb = oneUrl || (d.cover_url || "").trim() || d.local_url || (vid && vid.url) || "";
+        const localUrl = oneUrl || d.local_url || (vid && vid.url) || "";
         box.innerHTML = thumb
           ? `<div class="rp-th rp-th-video" title="点击预览视频">
               <img src="${esc(thumb)}" alt="封面" referrerpolicy="no-referrer" loading="lazy"
@@ -3702,7 +3830,7 @@ function rpMediaOrder() {
   const unchanged = order.length === RP_MEDIA_LEN && order.every((v, i) => v === i);
   return unchanged ? null : order;
 }
-function hideRepost() { $("repost").style.display = "none"; REPOST_ID = null; REPOST_SOURCE = "content"; }
+function hideRepost() { $("repost").style.display = "none"; REPOST_ID = null; REPOST_SOURCE = "content"; REPOST_FILE_INDEX = null; }
 async function submitRepost() {
   if (REPOST_ID === null) return;
   const accId = +$("rp-acc").value;
@@ -3725,7 +3853,9 @@ async function submitRepost() {
     scheduled_at: $("rp-when").value || null,
     visibility: $("rp-visibility") ? $("rp-visibility").value : "public",
     allow_save: $("rp-allowsave") ? $("rp-allowsave").value !== "0" : true,
-    media_order: rpMediaOrder(),
+    media_order: (REPOST_SOURCE === "share" && Number.isInteger(REPOST_FILE_INDEX))
+      ? [REPOST_FILE_INDEX]
+      : rpMediaOrder(),
   };
   const pname = REPOST_PF_NAME[REPOST_TARGET] || "小红书";
   const apiPath = REPOST_SOURCE === "share"

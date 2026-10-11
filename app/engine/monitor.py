@@ -110,6 +110,21 @@ def _select_douyin_awemes(items: list, quality: str, first_scan: bool,
     return current + historical[:max(0, initial_backfill_count)]
 
 
+def _apply_tiktok_monitor_author(target, author: dict, user_ref: str) -> None:
+    """写入被监控主页的昵称/头像。登录账号自己的资料对不上 handle 则丢弃。"""
+    if not author:
+        return
+    from ..platforms.tiktok import handle_from_user_ref
+    want = handle_from_user_ref(user_ref).lower()
+    got = (author.get("douyin_id") or "").lstrip("@").lower()
+    if want and got and got != want:
+        return
+    if author.get("nickname"):
+        target.nickname = author["nickname"]
+    if author.get("avatar"):
+        target.avatar = author["avatar"]
+
+
 def _douyin_scan_since(monitor_since: int, known_create_times: list[int]) -> int:
     """给旧版残缺首扫留出自愈窗口，但不回退到整个账号历史。"""
     latest_known = max((ts or 0 for ts in known_create_times), default=0)
@@ -1116,9 +1131,9 @@ class MonitorEngine:
         return {"ok": not error, "new": len(new_records), "error": error}
 
     async def _scan_tiktok_target_locked(self, target_id: int) -> dict:
-        """TikTok 用户监控:yt-dlp 拉最近作品并入库下载。"""
+        """TikTok 用户监控:用已登录账号浏览器打开主页拦截作品列表。"""
         from ..platforms.tiktok import (
-            fetch_tiktok_videos, parse_tt_entry,
+            fetch_tiktok_videos, fetch_tt_user_videos, parse_tt_web_item,
         )
         with get_session() as s:
             target = s.get(MonitorTarget, target_id)
@@ -1128,16 +1143,19 @@ class MonitorEngine:
             user_ref = target.sec_uid
             if not user_ref:
                 return self._mark_target_skip(target_id, "缺少 TikTok 用户标识")
-            state = ""
-            proxy = ""
-            if target.account_id:
-                acc = s.get(DouyinAccount, target.account_id)
-                if acc:
-                    if self._proxy_bad(acc):
-                        return self._mark_target_skip(
-                            target_id, "账号代理标记为不可用(proxy bad),已跳过以免暴露真实 IP")
-                    state = acc.storage_state or ""
-                    proxy = acc.proxy or ""
+            if not target.account_id:
+                return self._mark_target_skip(
+                    target_id, "TikTok 作品监控必须绑定已登录账号,否则公开接口常被 IP/地区风控")
+            acc = s.get(DouyinAccount, target.account_id)
+            if not acc or acc.platform != "tiktok":
+                return self._mark_target_skip(
+                    target_id, "请绑定一个已登录的 TikTok 账号后再抓取")
+            if self._proxy_bad(acc):
+                return self._mark_target_skip(
+                    target_id, "账号代理标记为不可用(proxy bad),已跳过以免暴露真实 IP")
+            account_id = target.account_id
+            identity, proxy = self._identity_proxy(acc)
+            state = acc.storage_state or ""
             known = set(s.exec(
                 select(ContentRecord.aweme_id)
                 .where(ContentRecord.target_id == target_id)).all())
@@ -1147,51 +1165,67 @@ class MonitorEngine:
             backfill = target.initial_backfill_count
             if first_scan:
                 limit = 50 if backfill < 0 else max(0, min(backfill or 0, 50))
-                if limit == 0:
-                    entries, author, error = await fetch_tiktok_videos(
-                        user_ref, known_ids=set(), limit=1, proxy=proxy,
-                        state_json=state, user_agent=self.cfg.engine.user_agent)
-                    with get_session() as s2:
-                        t = s2.get(MonitorTarget, target_id)
-                        if t:
-                            t.last_scan_at = datetime.utcnow()
-                            t.last_error = error or ""
-                            if author:
-                                if author.get("nickname") and not t.nickname:
-                                    t.nickname = author["nickname"]
-                                if author.get("avatar") and not t.avatar:
-                                    t.avatar = author["avatar"]
-                            for e in entries:
-                                aw = parse_tt_entry(e, quality=quality)
-                                if aw:
-                                    s2.add(ContentRecord(
-                                        platform="tiktok", target_id=target_id,
-                                        aweme_id=aw.aweme_id, desc=aw.desc,
-                                        media_type=aw.media_type, quality=aw.quality_label,
-                                        create_time=aw.create_time, cover_url=aw.cover or "",
-                                        like_count=aw.like_count, comment_count=aw.comment_count,
-                                        duration=aw.duration,
-                                        media_json=json.dumps([{"url": m.url, "kind": m.kind,
-                                                                "ext": m.ext, "index": m.index}
-                                                               for m in aw.medias]),
-                                        download_status="skipped",
-                                    ))
-                            s2.add(t); s2.commit()
-                    return {"ok": not error, "new": 0, "error": error, "baseline": True}
             else:
                 limit = 30
 
-        entries, author, error = await fetch_tiktok_videos(
-            user_ref, known_ids=known, limit=limit, proxy=proxy,
-            state_json=state, user_agent=self.cfg.engine.user_agent)
+        max_scrolls = 0 if (first_scan and limit == 0) else max(2, min((limit or 30) // 3, 16))
+        entries, author, error = await fetch_tt_user_videos(
+            self.browser, identity, user_ref, known,
+            max_scrolls=max_scrolls,
+            block_media=self.cfg.engine.block_media_resources,
+        )
+        await self._persist_identity_cookies(account_id, identity)
+        count_hint = 0
+        try:
+            count_hint = int((author or {}).get("aweme_count") or 0)
+        except (TypeError, ValueError):
+            count_hint = 0
+        logged_out = str(error or "").startswith("logged_out")
+        sparse = count_hint >= 8 and len(entries) < 5
+        if (not logged_out) and ((not entries and error) or sparse):
+            fb, author2, err2 = await fetch_tiktok_videos(
+                user_ref, known_ids=known, limit=max(limit, 1),
+                proxy=proxy, state_json=state,
+                user_agent=self.cfg.engine.user_agent)
+            if fb and len(fb) > len(entries):
+                entries, author, error = fb, author2 or author, ""
+            elif err2 and not entries:
+                error = error or err2
+
+        if first_scan and limit == 0:
+            with get_session() as s2:
+                t = s2.get(MonitorTarget, target_id)
+                if t:
+                    t.last_scan_at = datetime.utcnow()
+                    t.last_error = error or ""
+                    _apply_tiktok_monitor_author(t, author, user_ref)
+                    for e in entries[:1]:
+                        aw = parse_tt_web_item(e, quality=quality)
+                        if aw:
+                            s2.add(ContentRecord(
+                                platform="tiktok", target_id=target_id,
+                                aweme_id=aw.aweme_id, desc=aw.desc,
+                                media_type=aw.media_type, quality=aw.quality_label,
+                                create_time=aw.create_time, cover_url=aw.cover or "",
+                                like_count=aw.like_count, comment_count=aw.comment_count,
+                                duration=aw.duration,
+                                media_json=json.dumps([{"url": m.url, "kind": m.kind,
+                                                        "ext": m.ext, "index": m.index}
+                                                       for m in aw.medias]),
+                                download_status="skipped",
+                            ))
+                    s2.add(t); s2.commit()
+            return {"ok": not error, "new": 0, "error": error, "baseline": True}
 
         new_records = []
         seen = set()
         for item in entries:
-            aw = parse_tt_entry(item, quality=quality)
+            aw = parse_tt_web_item(item, quality=quality)
             if not aw or aw.aweme_id in seen or aw.aweme_id in known:
                 continue
             seen.add(aw.aweme_id)
+            if first_scan and limit > 0 and len(new_records) >= limit:
+                break
             media_json = json.dumps([{"url": m.url, "kind": m.kind, "ext": m.ext,
                                       "index": m.index} for m in aw.medias])
             rec = ContentRecord(
@@ -1212,11 +1246,7 @@ class MonitorEngine:
             if t:
                 t.last_scan_at = datetime.utcnow()
                 t.last_error = error or ""
-                if author:
-                    if author.get("nickname") and not t.nickname:
-                        t.nickname = author["nickname"]
-                    if author.get("avatar") and not t.avatar:
-                        t.avatar = author["avatar"]
+                _apply_tiktok_monitor_author(t, author, user_ref)
                 s.add(t)
                 target_name = t.nickname or (user_ref[:24] if user_ref else "tiktok")
             s.commit()
@@ -1226,8 +1256,10 @@ class MonitorEngine:
         if new_records and not first_scan:
             await self._notify_new(target_name, [aw for _, aw in new_records])
 
-        await asyncio.gather(*(self._download(rec.id, aw, base_dir, proxy, state_json=state)
-                               for rec, aw in new_records))
+        await asyncio.gather(*(
+            self._download(rec.id, aw, base_dir, proxy, state_json=state, identity=identity)
+            for rec, aw in new_records
+        ))
         return {"ok": not error, "new": len(new_records), "error": error}
 
     def _mark_target_skip(self, target_id: int, msg: str) -> dict:
@@ -1874,10 +1906,10 @@ class MonitorEngine:
                              visibility: str = "public", allow_save: bool = True,
                              media_order: Optional[list] = None
                              ) -> Optional[int]:
-        """从已下载作品创建发往目标平台(小红书/抖音/视频号)的发布任务。返回任务 id。
+        """从已下载作品创建发往目标平台的发布任务。返回任务 id。
 
         只接收作品 id,内部自开会话取记录,避免跨会话传入已绑定的 ORM 对象。
-        target_platform: xhs / douyin / shipinhao / youtube。
+        target_platform: xhs / douyin / kuaishou / shipinhao / youtube / tiktok。
         title/desc/topics 为 None 时沿用作品原始内容;传了则用编辑后的值(发布前可改)。
         """
         with get_session() as s:
@@ -2802,8 +2834,69 @@ class MonitorEngine:
         except Exception as e:
             log.warning("通知发送失败: %s", e)
 
+    async def _download_tiktok_aweme(self, aweme, base_dir: str, proxy: str,
+                                     state_json: str = "", identity=None):
+        """有登录账号时不要走 yt-dlp 公开接口(会被 IP 风控),用浏览器拦截 playAddr。"""
+        from pathlib import Path
+        from ..platforms.tiktok import (
+            download_tiktok_video, download_tt_url, fetch_tt_video_detail,
+            looks_like_video_bytes, play_url_candidates, safe_title,
+            tt_media_is_direct, tt_watch_candidates,
+        )
+        url = aweme.medias[0].url if aweme.medias else ""
+        out_dir = self.downloader._target_dir(aweme.author_name, base_dir)
+        stem = f"{aweme.aweme_id}_{safe_title(aweme.desc) or aweme.aweme_id}"
+        dest = Path(out_dir) / f"{stem}.mp4"
+        dl_proxy = self._dl_proxy(proxy)
+        last_err = ""
+        if dest.is_file():
+            try:
+                head = dest.read_bytes()[:64]
+            except OSError:
+                head = b""
+            if dest.stat().st_size >= 4096 and looks_like_video_bytes(head):
+                return True, str(dest), ""
+            dest.unlink(missing_ok=True)
+        if tt_media_is_direct(url):
+            ok, path, last_err = await self.downloader.download_aweme(
+                aweme, base_dir, dl_proxy)
+            if ok:
+                return ok, path, last_err
+            if identity is not None:
+                err2 = await download_tt_url(self.browser, identity, url, dest)
+                if not err2:
+                    return True, str(dest), ""
+                last_err = last_err or err2
+        if identity is not None:
+            for watch in tt_watch_candidates(aweme):
+                print(f"[tt_dl] browser watch {watch}", flush=True)
+                raw = await fetch_tt_video_detail(self.browser, identity, watch)
+                plays = play_url_candidates(raw)
+                if not plays:
+                    continue
+                for play in plays:
+                    err2 = await download_tt_url(self.browser, identity, play, dest)
+                    if not err2:
+                        return True, str(dest), ""
+                    last_err = err2
+            return False, "", last_err or (
+                "所选 TikTok 账号未能读取播放地址（地区限制或登录态问题）"
+            )
+        watch = (tt_watch_candidates(aweme) or [url])[0]
+        ok, path, err_y = await download_tiktok_video(
+            watch, str(out_dir),
+            filename_stem=stem,
+            proxy=dl_proxy,
+            state_json=state_json,
+            user_agent=self.cfg.engine.user_agent,
+            quality=getattr(aweme, "quality_label", "") or "highest",
+        )
+        if ok:
+            return ok, path, err_y
+        return False, "", err_y or last_err or "TikTok 下载失败"
+
     async def _download(self, record_id: int, aweme, base_dir: str = "",
-                        proxy: str = "", state_json: str = ""):
+                        proxy: str = "", state_json: str = "", identity=None):
         async with self._sem:
             with get_session() as s:
                 rec = s.get(ContentRecord, record_id)
@@ -2824,18 +2917,8 @@ class MonitorEngine:
                     quality=getattr(aweme, "quality_label", "") or "highest",
                 )
             elif getattr(aweme, "platform", "") == "tiktok":
-                from ..platforms.tiktok import download_tiktok_video, safe_title
-                watch = aweme.medias[0].url if aweme.medias else ""
-                out_dir = self.downloader._target_dir(aweme.author_name, base_dir)
-                stem = f"{aweme.aweme_id}_{safe_title(aweme.desc) or aweme.aweme_id}"
-                ok, path, err = await download_tiktok_video(
-                    watch, str(out_dir),
-                    filename_stem=stem,
-                    proxy=self._dl_proxy(proxy),
-                    state_json=state_json,
-                    user_agent=self.cfg.engine.user_agent,
-                    quality=getattr(aweme, "quality_label", "") or "highest",
-                )
+                ok, path, err = await self._download_tiktok_aweme(
+                    aweme, base_dir, proxy, state_json=state_json, identity=identity)
             else:
                 ok, path, err = await self.downloader.download_aweme(
                     aweme, base_dir, self._dl_proxy(proxy))
@@ -2883,11 +2966,14 @@ class MonitorEngine:
             kind = (t.target_kind if t else "creator")
             acc_state = ""
             acc_proxy = ""
+            identity = None
             if t and t.account_id:
                 acc = s.get(DouyinAccount, t.account_id)
                 if acc:
                     acc_state = acc.storage_state or ""
                     acc_proxy = acc.proxy or ""
+                    if acc.platform == "tiktok":
+                        identity = self.browser.identity_for(acc)
             media_json = rec.media_json
             aw = self._rebuild_aweme(rec, author_name)
             rec.download_status = "downloading"
@@ -2955,21 +3041,12 @@ class MonitorEngine:
                 quality=qlabel,
             )
         elif platform == "tiktok":
-            from ..platforms.tiktok import download_tiktok_video, safe_title
-            watch = aw.medias[0].url if aw.medias else ""
-            out_dir = self.downloader._target_dir(author_name, base_dir)
-            stem = f"{aw.aweme_id}_{safe_title(aw.desc) or aw.aweme_id}"
             with get_session() as s:
                 rec_q = s.get(ContentRecord, record_id)
                 qlabel = (rec_q.quality if rec_q else "") or "highest"
-            ok, path, err = await download_tiktok_video(
-                watch, str(out_dir),
-                filename_stem=stem,
-                proxy=self._dl_proxy(acc_proxy),
-                state_json=acc_state,
-                user_agent=self.cfg.engine.user_agent,
-                quality=qlabel,
-            )
+            aw.quality_label = qlabel
+            ok, path, err = await self._download_tiktok_aweme(
+                aw, base_dir, acc_proxy, state_json=acc_state, identity=identity)
         else:
             ok, path, err = await self.downloader.download_aweme(
                 aw, base_dir, self._dl_proxy(acc_proxy))

@@ -42,6 +42,7 @@ class Downloader:
         _pf = getattr(aweme, "platform", "douyin")
         referer = ("https://www.xiaohongshu.com/" if _pf == "xhs"
                    else "https://www.kuaishou.com/" if _pf == "kuaishou"
+                   else "https://www.tiktok.com/" if _pf == "tiktok"
                    else "https://www.douyin.com/")
         headers = {"User-Agent": self.ua, "Referer": referer}
 
@@ -51,7 +52,9 @@ class Downloader:
                 async def fetch(m):
                     fpath = out_dir / self._filename(aweme, m, title)
                     if fpath.exists() and fpath.stat().st_size > 0:
-                        return str(fpath), ""        # 已存在,跳过
+                        if _looks_like_saved_media(fpath):
+                            return str(fpath), ""        # 已存在且像视频,跳过
+                        fpath.unlink(missing_ok=True)
                     async with self._media_sem:
                         err = await self._download_one(cli, m.url, fpath)
                     return (str(fpath), "") if not err else ("", err)
@@ -82,7 +85,11 @@ class Downloader:
                     if r.status_code == 416:           # 已下完(范围越界)
                         if tmp.exists() and tmp.stat().st_size > 0:
                             tmp.replace(fpath)
-                            return ""
+                            if _looks_like_saved_media(fpath):
+                                return ""
+                            fpath.unlink(missing_ok=True)
+                            last = "文件不是可播放视频"
+                            continue
                         tmp.unlink(missing_ok=True)
                         last = "HTTP 416"
                         continue
@@ -104,6 +111,10 @@ class Downloader:
                         await asyncio.sleep(attempt + 1)
                         continue
                     tmp.replace(fpath)
+                    if not _looks_like_saved_media(fpath):
+                        fpath.unlink(missing_ok=True)
+                        last = "文件不是可播放视频"
+                        continue
                     return ""
             except Exception as e:
                 last = repr(e)                          # 网络中断也保留 .part,下次续传
@@ -117,3 +128,22 @@ class Downloader:
             tail = cr.rsplit("/", 1)[-1] if "/" in cr else ""
             return int(tail) if tail.isdigit() else 0
         return int(r.headers.get("content-length") or 0)
+
+
+def _looks_like_saved_media(path: Path) -> bool:
+    """跳过已存在文件时,别把 protobuf/HTML 当成下好的 mp4。"""
+    suffix = path.suffix.lower()
+    if suffix not in {".mp4", ".m4v", ".mov", ".webm"}:
+        return True
+    try:
+        if path.stat().st_size < 4096:
+            return False
+        with path.open("rb") as f:
+            head = f.read(64)
+    except OSError:
+        return False
+    if len(head) < 12:
+        return False
+    if head[4:8] == b"ftyp" or b"ftyp" in head[:32]:
+        return True
+    return head.startswith(b"\x1aE\xdf\xa3")

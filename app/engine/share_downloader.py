@@ -535,6 +535,14 @@ class ShareDownloader:
         if not self.allow_private and is_private_url(canonical):
             raise ShareDownloadError("链接指向本机或内网地址，已停止请求")
 
+    @staticmethod
+    def _prepare_url(url: str) -> str:
+        try:
+            from ..platforms.tiktok.resolve import canonicalize_tiktok_share_url
+            return canonicalize_tiktok_share_url(url)
+        except Exception:
+            return url
+
     def _base_options(
         self,
         *,
@@ -581,6 +589,7 @@ class ShareDownloader:
         proxy: str = "",
         cookie_file: str = "",
     ) -> dict[str, Any]:
+        url = self._prepare_url(url)
         self._check_url(url)
         yt_dlp = self._load_yt_dlp()
         logger = _YDLLogger()
@@ -625,6 +634,7 @@ class ShareDownloader:
         cookie_file: str = "",
         max_filesize_mb: int = 0,
     ) -> dict[str, Any]:
+        url = self._prepare_url(url)
         self._check_url(url)
         yt_dlp = self._load_yt_dlp()
         logger = _YDLLogger()
@@ -791,6 +801,21 @@ def _clean_ydl_error(message: str) -> str:
         return (
             "yt-dlp 不支持这条快手网页/分享链；请选择一个已登录的快手账号，"
             "CreatorHub 将用浏览器打开作品页下载"
+        )
+    if "shortdrama" in lowered or (
+        "unsupported url" in lowered and "tiktok.com" in lowered
+        and "video/" not in lowered
+    ):
+        return (
+            "这是 TikTok 短剧页（/shortdrama/episode/），不是普通作品链。"
+            "已尝试按作品 id 下载；若仍失败，请选择已登录的 TikTok 账号，"
+            "或打开该集后复制 /@用户/video/ 链接"
+        )
+    if "ip address is blocked" in lowered:
+        return (
+            "TikTok 拒绝了当前 IP（地区限制或风控）。"
+            "请在「复用账号登录态」里选择一个已登录的 TikTok 账号；"
+            "短剧页会用该账号浏览器打开原链接下载，不要走未登录的公开接口"
         )
     return clean or "媒体提取失败"
 
