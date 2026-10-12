@@ -147,6 +147,7 @@ class MonitorEngine:
         self._inflight: set = set()           # 正在抓取的目标,避免同目标并发
         self._publish_sem = asyncio.Semaphore(1)   # 发布串行(有头浏览器,一次一个)
         self._publishing: set[int] = set()
+        self._publish_jobs: dict[int, asyncio.Task] = {}
         self._commenting: set[int] = set()         # 正在执行的评论任务 id
         self._actioning: set[int] = set()           # 正在执行的写操作任务 id
         self._last_acct_check = time.time()   # 上次账号体检时间
@@ -167,6 +168,11 @@ class MonitorEngine:
         if self._task:
             self._task.cancel()
             self._task = None
+        jobs = list(self._publish_jobs.values())
+        for job in jobs:
+            job.cancel()
+        if jobs:
+            await asyncio.wait(jobs, timeout=5)
 
     # ── 账号隔离调度 ──
     @asynccontextmanager
@@ -1960,12 +1966,38 @@ class MonitorEngine:
                 if t.scheduled_at is None or t.scheduled_at <= now:
                     due.append(t.id)
         for tid in due:
-            await self.publish_task(tid)
+            self._schedule_publish(tid)
 
-    async def publish_task(self, task_id: int) -> dict:
+    def _schedule_publish(self, task_id: int) -> dict:
+        """标成发布中并丢给后台任务。主循环不等浏览器操作结束。"""
         if task_id in self._publishing:
-            return {"ok": False, "error": "正在发布中"}
+            return {"ok": True, "started": False, "error": "正在发布中"}
         self._publishing.add(task_id)
+        try:
+            with get_session() as s:
+                t = s.get(PublishTask, task_id)
+                if not t:
+                    self._publishing.discard(task_id)
+                    return {"ok": False, "error": "任务不存在"}
+                if t.status == "done":
+                    self._publishing.discard(task_id)
+                    return {"ok": False, "error": "任务已发布"}
+                if t.status == "canceled":
+                    self._publishing.discard(task_id)
+                    return {"ok": False, "error": "任务已取消"}
+                t.status = "publishing"
+                t.error = ""
+                s.add(t)
+                s.commit()
+        except Exception:
+            self._publishing.discard(task_id)
+            raise
+        job = asyncio.create_task(self._run_publish_job(task_id))
+        self._publish_jobs[task_id] = job
+        log.info("发布任务 %s 已交给后台执行", task_id)
+        return {"ok": True, "started": True}
+
+    async def _run_publish_job(self, task_id: int) -> None:
         try:
             with get_session() as s:
                 t = s.get(PublishTask, task_id)
@@ -1973,9 +2005,21 @@ class MonitorEngine:
             # 发布串行 + 该账号串行(有头浏览器会接管该账号 profile,不能与抓取并发)
             async with self._publish_sem:
                 async with self._account_guard(account_id, fallback_key=f"pub:{task_id}"):
-                    return await self._publish_task_locked(task_id)
+                    await self._publish_task_locked(task_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.exception("发布任务 %s 失败", task_id)
+            try:
+                await self._finish_publish(task_id, False, "", f"发布异常: {e!r}")
+            except Exception:
+                log.exception("发布任务 %s 无法写入失败状态", task_id)
         finally:
             self._publishing.discard(task_id)
+            self._publish_jobs.pop(task_id, None)
+
+    async def publish_task(self, task_id: int) -> dict:
+        return self._schedule_publish(task_id)
 
     async def _publish_task_locked(self, task_id: int) -> dict:
         with get_session() as s:

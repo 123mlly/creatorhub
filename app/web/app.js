@@ -3463,10 +3463,13 @@ async function openPubInBrowser(accountId, url) {
 }
 async function runPublish(id) {
   const btn = evtBtn();
-  toast("发布中…会弹出浏览器窗口完成发布", "info", 8000);
   await withBusy(btn, "发布中", async () => {
-    try { const r = await api("/api/publish/" + id + "/run-now", { method: "POST" }); toast(r.ok ? "发布成功 ✓" : "发布未成功:" + (r.error || ""), r.ok ? "ok" : "err", 6000); }
-    catch (e) { toast("发布失败:" + e.message, "err"); }
+    try {
+      const r = await api("/api/publish/" + id + "/run-now", { method: "POST" });
+      if (r.started) toast("已开始发布，完成后列表会更新", "ok");
+      else if (r.ok) toast(r.error || "已在发布中", "info");
+      else toast("发布未成功:" + (r.error || ""), "err", 6000);
+    } catch (e) { toast("发布失败:" + e.message, "err"); }
   });
   refreshPublish();
 }

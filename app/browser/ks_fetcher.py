@@ -19,8 +19,10 @@ from .manager import BrowserManager
 GRAPHQL_API = "/graphql"
 # 评论现走 REST v2(实测):/rest/v/photo/comment/list 返回 rootCommentsV2
 COMMENT_API = "/rest/v/photo/comment/"
-# 作品列表现走 REST(实测 [ks_videos] 只见 /rest/v/profile/feed,无 graphql)
+# 作品列表现走 REST。新版主页默认只拉 profile/get 和直播回放,
+# /rest/v/profile/feed 要等点开「作品」或由页面里主动 POST。
 PROFILE_FEED_API = "/rest/v/profile/feed"
+PROFILE_GET_API = "/rest/v/profile/get"
 PROFILE_URL = "https://www.kuaishou.com/profile/{uid}"
 PHOTO_URL = "https://www.kuaishou.com/short-video/{pid}"
 
@@ -48,6 +50,22 @@ def _dig_rest_feeds(data: dict) -> list:
             if isinstance(v, list):
                 return v
     return []
+
+
+def _as_feed_item(it: dict) -> Optional[dict]:
+    """统一成 parse_ks_feed 要的 {photo, author}。REST 项有的已包 photo,有的本身就是 photo。"""
+    if not isinstance(it, dict):
+        return None
+    photo = it.get("photo") if isinstance(it.get("photo"), dict) else None
+    if photo is None and (it.get("id") or it.get("photoId") or it.get("photo_id")):
+        photo = it
+        it = {"photo": photo, "author": it.get("author") or {}}
+    if not isinstance(photo, dict):
+        return None
+    pid = str(_rf(photo, "id", "photoId", "photo_id", default=""))
+    if not pid:
+        return None
+    return it
 
 
 def _dig_feeds(data: dict) -> list:
@@ -106,29 +124,38 @@ async def fetch_ks_videos(mgr: BrowserManager, identity: Identity, user_id: str,
     feed_sample: list = []       # 标定:REST feed 首个作品项样本(字段核对用)
     page = await mgr.new_page(identity, block_media)
 
+    def _take_rest(data: dict) -> int:
+        nonlocal author
+        n = 0
+        for raw in _dig_rest_feeds(data):
+            it = _as_feed_item(raw)
+            if not it:
+                continue
+            photo = it["photo"]
+            pid = str(_rf(photo, "id", "photoId", "photo_id", default=""))
+            if pid in collected:
+                continue
+            collected[pid] = it
+            n += 1
+            if not feed_sample:
+                feed_sample.append("photo=" + str(photo)[:1100])
+            if author is None and it.get("author"):
+                author = {"profile": it["author"]}
+        return n
+
     async def on_response(resp):
         nonlocal author
-        # 快手作品现走 REST /rest/v/profile/feed(实测项已含嵌套 photo,同 graphql 形状);
-        # 直接透传给下游 _norm_ks_work(读 feed.photo),老账号仍走 graphql,两路都收
-        if PROFILE_FEED_API in resp.url:
+        # 新版主页:作品在 /rest/v/profile/feed;资料在 /rest/v/profile/get(有时也夹作品)。
+        # 老账号仍走 graphql。feed 命中后不再记进 api_seen。
+        if PROFILE_FEED_API in resp.url or PROFILE_GET_API in resp.url:
             try:
                 data = await resp.json()
             except Exception:
+                data = None
+            if isinstance(data, dict):
+                _take_rest(data)
+            if PROFILE_FEED_API in resp.url:
                 return
-            items = _dig_rest_feeds(data)
-            for it in items:
-                photo = it.get("photo") if isinstance(it, dict) else None
-                if not isinstance(photo, dict):
-                    continue
-                pid = str(_rf(photo, "id", "photoId", "photo_id", default=""))
-                if not pid:
-                    continue
-                collected[pid] = it       # 整项带 photo,交 _norm_ks_work 统一归一
-                if not feed_sample:
-                    feed_sample.append("photo=" + str(photo)[:1100])   # 核对 photo 字段名
-                if author is None and it.get("author"):
-                    author = {"profile": it["author"]}
-            return
         if GRAPHQL_API in resp.url:
             # GraphQL 都打到 /graphql,operationName 在请求体里 —— 取出来看到底发了哪些查询
             op = ""
@@ -167,6 +194,19 @@ async def fetch_ks_videos(mgr: BrowserManager, identity: Identity, user_id: str,
         await page.goto(open_url or PROFILE_URL.format(uid=user_id),
                         wait_until="domcontentloaded", timeout=30000)
         await page.wait_for_timeout(settle_ms)
+        # 新版主页默认停在直播回放,不点「作品」就不会请求 profile/feed。
+        if not collected:
+            try:
+                tab = page.get_by_text("作品", exact=True)
+                ntab = await tab.count()
+                for i in range(min(ntab, 4)):
+                    loc = tab.nth(i)
+                    if await loc.is_visible():
+                        await loc.click(timeout=2000)
+                        await page.wait_for_timeout(settle_ms)
+                        break
+            except Exception:
+                pass
         stagnant = 0
         for _ in range(max_scrolls):
             if known_ids & set(collected.keys()):     # 翻到旧内容了
@@ -181,11 +221,34 @@ async def fetch_ks_videos(mgr: BrowserManager, identity: Identity, user_id: str,
             else:
                 stagnant = 0
         final_url = page.url
+        # 页面自己没发 feed 时,用已打开的登录页主动拉一次作品列表。
+        if not collected and "passport" not in (page.url or "") and "/login" not in (page.url or ""):
+            try:
+                pulled = await page.evaluate("""async (userId) => {
+                  const url = "https://www.kuaishou.com/rest/v/profile/feed";
+                  const body = {user_id: userId, pcursor: "", page: "profile"};
+                  const r = await fetch(url, {
+                    method: "POST", credentials: "include",
+                    headers: {"Content-Type": "application/json"},
+                    body: JSON.stringify(body),
+                  });
+                  const j = await r.json();
+                  j.__status = r.status;
+                  return j;
+                }""", user_id)
+            except Exception as e:
+                pulled = {"__err": repr(e)}
+            if isinstance(pulled, dict):
+                _take_rest(pulled)
+                if not collected:
+                    keys = [k for k in pulled.keys() if not str(k).startswith("__")][:12]
+                    print(f"[ks_videos] feed POST status={pulled.get('__status')} "
+                          f"keys={keys} err={pulled.get('__err') or pulled.get('error_msg') or ''}")
         if not collected:
             if "passport" in final_url or "/login" in final_url:
                 error = "logged_out:登录态失效,请重新登录"
             else:
-                error = "未拦截到作品数据(可能未登录/被风控/该用户无公开作品)"
+                error = "未拦截到作品数据(主页已打开但没有作品列表,不是登录跳转)"
     except Exception as e:
         error = f"打开主页失败: {e!r}"
     finally:
