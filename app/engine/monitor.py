@@ -380,6 +380,21 @@ class MonitorEngine:
                 if not a:
                     continue
                 nick = a.nickname or ""
+                # YouTube 半掉线可能误抓到别人频道:先拦掉,再走 logged_out 计次
+                if u and platform == "youtube":
+                    from ..platforms.youtube import (
+                        parse_yt_self_user, yt_profile_conflicts,
+                    )
+                    _yt_p = parse_yt_self_user(u)
+                    if yt_profile_conflicts(a.sec_uid or "", _yt_p):
+                        log.warning(
+                            "账号 %s(%s) YouTube 资料频道冲突"
+                            "(原 %s → 抓到 %s),按掉线处理",
+                            aid, a.nickname,
+                            (a.sec_uid or "")[:24],
+                            (_yt_p.get("sec_uid") or "")[:24])
+                        u = None
+                        err = "logged_out"
                 if u:
                     if platform == "xhs":
                         p = parse_xhs_self_user(u)

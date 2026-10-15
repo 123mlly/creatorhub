@@ -14,7 +14,11 @@ from .fetcher import (
     apply_yt_dlp_youtube_opts,
 )
 from .publish import publish_youtube
-from .profile import fetch_youtube_self_profile, parse_yt_self_user
+from .profile import (
+    fetch_youtube_self_profile,
+    parse_yt_self_user,
+    yt_profile_conflicts,
+)
 
 __all__ = [
     "resolve_youtube_channel_ref",
@@ -35,4 +39,5 @@ __all__ = [
     "publish_youtube",
     "fetch_youtube_self_profile",
     "parse_yt_self_user",
+    "yt_profile_conflicts",
 ]

@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+import json
 import re
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -114,14 +115,16 @@ async def fetch_ks_videos(mgr: BrowserManager, identity: Identity, user_id: str,
                           settle_ms: int = 1800, block_media: bool = True,
                           open_url: str = ""
                           ) -> Tuple[List[dict], Optional[dict], str]:
-    """打开创作者主页并下滑,拦截 GraphQL 收集作品 feeds。
+    """打开创作者主页并下滑,拦截页面自带签名的 REST/GraphQL 收集作品 feeds。
     返回 (新作品 feed 列表, 作者 userProfile dict, error)。
-    open_url 非空时直接打开它(如站内「我」入口解析出的自己主页链接)。"""
+    注意:裸 page.evaluate(fetch('/profile/feed')) 会「签名验证失败」,必须让页面自己发请求。"""
     collected: Dict[str, dict] = {}
     author: Optional[dict] = None
     error = ""
     api_seen: list = []          # 诊断:看到的 GraphQL operation + 其它响应路径
     feed_sample: list = []       # 标定:REST feed 首个作品项样本(字段核对用)
+    profile_meta = {"result": None, "err": ""}
+    feed_meta = {"seen": False, "err": ""}
     page = await mgr.new_page(identity, block_media)
 
     def _take_rest(data: dict) -> int:
@@ -150,14 +153,23 @@ async def fetch_ks_videos(mgr: BrowserManager, identity: Identity, user_id: str,
         if PROFILE_FEED_API in resp.url or PROFILE_GET_API in resp.url:
             try:
                 data = await resp.json()
-            except Exception:
+            except Exception as e:
                 data = None
+                if PROFILE_FEED_API in resp.url:
+                    print(f"[ks_videos] feed json-fail status={resp.status} err={e!r}")
             if isinstance(data, dict):
+                if PROFILE_GET_API in resp.url and profile_meta["result"] is None:
+                    profile_meta["result"] = data.get("result")
+                    profile_meta["err"] = str(data.get("error_msg") or "")[:40]
+                if PROFILE_FEED_API in resp.url:
+                    feed_meta["seen"] = True
+                    feed_meta["err"] = str(data.get("error_msg") or "")[:80]
+                    print(f"[ks_videos] feed status={resp.status} "
+                          f"keys={list(data.keys())[:12]} err={feed_meta['err']}")
                 _take_rest(data)
             if PROFILE_FEED_API in resp.url:
                 return
         if GRAPHQL_API in resp.url:
-            # GraphQL 都打到 /graphql,operationName 在请求体里 —— 取出来看到底发了哪些查询
             op = ""
             try:
                 pd = resp.request.post_data or ""
@@ -167,10 +179,12 @@ async def fetch_ks_videos(mgr: BrowserManager, identity: Identity, user_id: str,
                 pass
             if len(api_seen) < 40:
                 api_seen.append(f"{resp.status} gql:{op or '?'}")
-        elif "kuaishou.com" in resp.url and resp.request.resource_type in ("xhr", "fetch"):
+        elif resp.request.resource_type in ("xhr", "fetch"):
             if len(api_seen) < 40:
-                p = resp.url.split("?")[0].split("kuaishou.com")[-1]
-                api_seen.append(f"{resp.status} {p}")
+                p = resp.url.split("?")[0]
+                if "://" in p:
+                    p = p.split("://", 1)[1]
+                api_seen.append(f"{resp.status} {p[:140]}")
         if GRAPHQL_API not in resp.url:
             return
         try:
@@ -190,25 +204,58 @@ async def fetch_ks_videos(mgr: BrowserManager, identity: Identity, user_id: str,
 
     page.on("response", on_response)
     final_url = ""
+    clicked = ""
     try:
         await page.goto(open_url or PROFILE_URL.format(uid=user_id),
                         wait_until="domcontentloaded", timeout=30000)
         await page.wait_for_timeout(settle_ms)
-        # 新版主页默认停在直播回放,不点「作品」就不会请求 profile/feed。
-        if not collected:
+        try:
+            login_wall = await page.evaluate(
+                "() => (document.body && document.body.innerText || '').includes('快去登录')")
+        except Exception:
+            login_wall = False
+        # 页面自己的 profile/get 返回 109,或作品区写着去登录:会话没被页面接受。
+        if not collected and (login_wall or profile_meta["result"] == 109):
+            error = "logged_out:页面未接受当前登录态(作品区要求登录),请重新扫码"
+            final_url = page.url
+        elif not collected and feed_meta["err"]:
+            error = feed_meta["err"]
+            final_url = page.url
+        # 新版主页默认停在直播回放。用真实鼠标点「作品」,让页面自己带签名去拉列表。
+        # 不要 page.evaluate(fetch):会「签名验证失败」。
+        pos = None
+        if not error and not collected:
             try:
-                tab = page.get_by_text("作品", exact=True)
-                ntab = await tab.count()
-                for i in range(min(ntab, 4)):
-                    loc = tab.nth(i)
-                    if await loc.is_visible():
-                        await loc.click(timeout=2000)
-                        await page.wait_for_timeout(settle_ms)
-                        break
+                pos = await page.evaluate("""() => {
+                  const nodes = document.querySelectorAll('a,button,div,span,li');
+                  let best = null, bestLen = 99, bestText = '';
+                  for (const el of nodes) {
+                    const t = (el.innerText || '').replace(/\\s+/g, ' ').trim();
+                    if (!/^作品(\\s*\\d+)?$/.test(t)) continue;
+                    const r = el.getBoundingClientRect();
+                    if (r.width < 8 || r.height < 8 || r.bottom < 0 || r.top > innerHeight) continue;
+                    if (t.length < bestLen) { best = r; bestLen = t.length; bestText = t; }
+                  }
+                  if (!best) return null;
+                  return {x: best.left + best.width / 2, y: best.top + best.height / 2, text: bestText};
+                }""")
+                if pos:
+                    clicked = pos.get("text") or ""
+                    async with page.expect_response(
+                        lambda r: ("profile/feed" in r.url or "/graphql" in r.url
+                                   or "photo/list" in r.url),
+                        timeout=8000,
+                    ):
+                        await page.mouse.click(pos["x"], pos["y"])
             except Exception:
-                pass
+                if pos:
+                    try:
+                        await page.mouse.click(pos["x"], pos["y"])
+                    except Exception:
+                        pass
+            await page.wait_for_timeout(1000)
         stagnant = 0
-        for _ in range(max_scrolls):
+        for _ in range(0 if error else max_scrolls):
             if known_ids & set(collected.keys()):     # 翻到旧内容了
                 break
             before = len(collected)
@@ -220,32 +267,11 @@ async def fetch_ks_videos(mgr: BrowserManager, identity: Identity, user_id: str,
                     break
             else:
                 stagnant = 0
-        final_url = page.url
-        # 页面自己没发 feed 时,用已打开的登录页主动拉一次作品列表。
-        if not collected and "passport" not in (page.url or "") and "/login" not in (page.url or ""):
-            try:
-                pulled = await page.evaluate("""async (userId) => {
-                  const url = "https://www.kuaishou.com/rest/v/profile/feed";
-                  const body = {user_id: userId, pcursor: "", page: "profile"};
-                  const r = await fetch(url, {
-                    method: "POST", credentials: "include",
-                    headers: {"Content-Type": "application/json"},
-                    body: JSON.stringify(body),
-                  });
-                  const j = await r.json();
-                  j.__status = r.status;
-                  return j;
-                }""", user_id)
-            except Exception as e:
-                pulled = {"__err": repr(e)}
-            if isinstance(pulled, dict):
-                _take_rest(pulled)
-                if not collected:
-                    keys = [k for k in pulled.keys() if not str(k).startswith("__")][:12]
-                    print(f"[ks_videos] feed POST status={pulled.get('__status')} "
-                          f"keys={keys} err={pulled.get('__err') or pulled.get('error_msg') or ''}")
-        if not collected:
-            if "passport" in final_url or "/login" in final_url:
+        final_url = page.url or final_url
+        if not collected and not error:
+            if feed_meta["err"]:
+                error = feed_meta["err"]
+            elif "passport" in final_url or "/login" in final_url:
                 error = "logged_out:登录态失效,请重新登录"
             else:
                 error = "未拦截到作品数据(主页已打开但没有作品列表,不是登录跳转)"
@@ -258,9 +284,9 @@ async def fetch_ks_videos(mgr: BrowserManager, identity: Identity, user_id: str,
             pass
 
     if not collected:
-        print(f"[ks_videos] user_id={user_id!r} open_url={open_url!r} "
+        print(f"[ks_videos] user_id={user_id!r} tab={clicked!r} "
+              f"profile_result={profile_meta['result']!r} feed_err={feed_meta['err']!r} "
               f"final_url={final_url} api_seen({len(api_seen)})={api_seen[:40]}")
-    # REST feed 命中但可能字段没对齐:打样本便于核对 _rest_item_to_feed
     if feed_sample:
         print(f"[ks_videos] feed_sample={feed_sample[0]}")
 
@@ -487,9 +513,13 @@ async () => {
 
 def _extract_rest_profile(data: dict):
     """从 /rest/v/profile/get 响应里抽出 userProfile 结构(喂给 parse_self_user)。
-    快手该接口字段未知,这里多形状兜底;并把扁平计数归并进 ownerCount。"""
+    新版接口是扁平字段:userName/userHead/userId/eid/fans/follows;老版嵌套 profile。"""
     if not isinstance(data, dict):
         return None, []
+    # 签名失败 / 未登录:不要当真资料
+    if data.get("result") not in (1, "1", None) and not any(
+            k in data for k in ("userProfile", "profile", "userName", "user_name")):
+        return None, list(data.keys())
     # 1) 已是 graphql 形状
     up = data.get("userProfile")
     if isinstance(up, dict) and up.get("profile"):
@@ -501,16 +531,21 @@ def _extract_rest_profile(data: dict):
         if isinstance(c, dict) and any(k in c for k in NAME_KEYS):
             oc = (c.get("ownerCount") or data.get("ownerCount")
                   or data.get("counts") or {})
-            # 扁平计数兜底
             flat = {k: c.get(k) or data.get(k) for k in
-                    ("fan", "photo", "photo_public", "follow", "fanCount",
-                     "photoCount", "follower")}
+                    ("fan", "fans", "photo", "photo_public", "follow", "follows",
+                     "fanCount", "photoCount", "follower")}
             merged = {**{k: v for k, v in flat.items() if v is not None}, **oc}
             return {"profile": c, "ownerCount": merged}, list(c.keys())
-    # 3) 顶层就是扁平 profile
+    # 3) 顶层扁平 profile(新版 /rest/v/profile/get: userName/userHead/eid/fans)
     if any(k in data for k in NAME_KEYS):
-        return ({"profile": data, "ownerCount": data.get("ownerCount") or {}},
-                list(data.keys()))
+        oc = data.get("ownerCount") or {}
+        if not isinstance(oc, dict):
+            oc = {}
+        for src, dst in (("fans", "fan"), ("follows", "follow"),
+                         ("fan", "fan"), ("photo", "photo")):
+            if data.get(src) is not None and dst not in oc:
+                oc[dst] = data.get(src)
+        return {"profile": data, "ownerCount": oc}, list(data.keys())
     return None, list(data.keys())
 
 
@@ -527,18 +562,21 @@ def _harvest_self(node, uid: str, out: list, depth: int = 0):
             name = (node.get("user_name") or node.get("userName") or node.get("name")
                     or node.get("nickName") or node.get("nickname") or "")
             head = (node.get("headurl") or node.get("headerUrl") or node.get("avatar")
-                    or node.get("headUrl") or "")
+                    or node.get("headUrl") or node.get("userHead") or "")
             if isinstance(head, list):
                 head = (head[0].get("url") if head and isinstance(head[0], dict)
                         else (head[0] if head else "")) or ""
-            u3 = (node.get("eid") or node.get("encryptedUserId") or "")
+            u3 = (node.get("eid") or node.get("encryptedUserId")
+                  or node.get("userDefineId") or "")
             uid_field = node.get("user_id") or node.get("userId") or node.get("id") or ""
             # user_id 形如 3x... 才是 web profile id;纯数字则不是
             if isinstance(uid_field, str) and uid_field.startswith("3x"):
                 u3 = u3 or uid_field
             if name or head or u3:
                 out.append({"profile": {"user_name": name, "headurl": head,
-                                        "user_id": u3}})
+                                        "user_id": u3,
+                                        "kwaiId": node.get("userDefineId") or "",
+                                        "eid": u3}})
                 return
         for v in node.values():
             _harvest_self(v, uid, out, depth + 1)
@@ -574,12 +612,29 @@ async def fetch_ks_self_profile(mgr: BrowserManager, identity: Identity,
 
     hits: list = []          # 含本人 uid 的响应里抽出的 profile 候选
     hit_urls: list = []      # 命中响应的 URL(诊断用)
+    # 页面自己带签名发的 /rest/v/profile/get(裸 page.evaluate(fetch) 会「签名验证失败」)
+    intercepted_rest: list = []
 
     async def on_response(resp):
-        if not uid_cookie or len(hits) >= 3:
-            return
         rt = resp.request.resource_type
         if rt not in ("xhr", "fetch", "document"):
+            return
+        # 优先拦页面自带签名的本人资料接口
+        if PROFILE_GET_API in resp.url and len(intercepted_rest) < 2:
+            try:
+                data = await resp.json()
+            except Exception:
+                data = None
+            if isinstance(data, dict):
+                intercepted_rest.append(data)
+                hit_urls.append(resp.url.split("?")[0])
+                if uid_cookie:
+                    try:
+                        _harvest_self(data, uid_cookie, hits)
+                    except Exception:
+                        pass
+            return
+        if not uid_cookie or len(hits) >= 3:
             return
         try:
             txt = await resp.text()
@@ -609,37 +664,62 @@ async def fetch_ks_self_profile(mgr: BrowserManager, identity: Identity,
                         + (f",errors={data.get('errors')}" if (data or {}).get("errors") else ""))
         return up if (up and up.get("profile")) else None
 
+    def _pick_3x(pf: dict) -> str:
+        if not isinstance(pf, dict):
+            return ""
+        for key in ("eid", "user_id", "userId", "userDefineId", "kwaiId"):
+            v = pf.get(key)
+            if isinstance(v, str) and v.startswith("3x"):
+                return v
+        return next((str(v) for v in pf.values()
+                     if isinstance(v, str) and v.startswith("3x")), "")
+
     try:
         await page.goto("https://www.kuaishou.com", wait_until="domcontentloaded",
                         timeout=30000)
         await page.wait_for_timeout(3000)     # 等头部自身信息接口回来
 
-        # ① 主路径:直接调本人资料 REST 接口 /rest/v/profile/get
+        # ① 优先用页面自己带签名的 /rest/v/profile/get(拦截到的)
         self3x = ""
-        try:
-            rp = await page.evaluate(_KS_REST_PROFILE_JS)
-        except Exception as e:
-            rp = {"__err": repr(e)}
-        up, top_keys = _extract_rest_profile(rp or {})
-        attempts.append(f"rest:method={(rp or {}).get('__method')},top_keys={top_keys[:12]}"
-                        + (f",err={rp.get('__err')}" if (rp or {}).get("__err") else ""))
-        if up and up.get("profile"):
-            pf = up["profile"]
-            result = up
-            # 真实 web profile id 是 3x... 形式,可能落在 user_id / eid / kwaiId 任一字段,
-            # 直接扫描所有字符串值找 3x 开头的那个
-            self3x = next((str(v) for v in pf.values()
-                           if isinstance(v, str) and v.startswith("3x")), "")
-            attempts.append(f"rest_profile:name={pf.get('user_name') or pf.get('userName') or pf.get('name') or '-'},"
-                            f"3x={self3x or '-'},pf_keys={list(pf.keys())[:14]}")
+        for rp in intercepted_rest:
+            up, top_keys = _extract_rest_profile(rp)
+            attempts.append(f"intercept_rest:result={rp.get('result')!r},"
+                            f"top_keys={top_keys[:12]},"
+                            f"err={rp.get('error_msg') or ''}")
+            if up and up.get("profile"):
+                pf = up["profile"]
+                result = up
+                self3x = _pick_3x(pf)
+                attempts.append(
+                    f"rest_profile:name={pf.get('user_name') or pf.get('userName') or pf.get('name') or '-'},"
+                    f"3x={self3x or '-'},pf_keys={list(pf.keys())[:14]}")
+                break
 
-        # ② 用真实 3x id 调 visionProfile 拿权威资料(含正确头像 + 粉丝/作品数,字段对齐)
+        # ② 拦截没有时再试 evaluate(多数会签名失败,仅作兜底)
+        if not result:
+            try:
+                rp = await page.evaluate(_KS_REST_PROFILE_JS)
+            except Exception as e:
+                rp = {"__err": repr(e)}
+            up, top_keys = _extract_rest_profile(rp or {})
+            attempts.append(f"rest:method={(rp or {}).get('__method')},top_keys={top_keys[:12]}"
+                            + (f",err={rp.get('__err') or rp.get('error_msg')}"
+                               if (rp or {}).get("__err") or (rp or {}).get("error_msg") else ""))
+            if up and up.get("profile"):
+                pf = up["profile"]
+                result = up
+                self3x = _pick_3x(pf)
+                attempts.append(
+                    f"rest_profile:name={pf.get('user_name') or pf.get('userName') or pf.get('name') or '-'},"
+                    f"3x={self3x or '-'},pf_keys={list(pf.keys())[:14]}")
+
+        # ③ 用真实 3x id 调 visionProfile 拿权威资料(含正确头像 + 粉丝/作品数,字段对齐)
         if self3x:
             full = await _vp(self3x)
             if full and full.get("profile"):
                 result = full      # graphql 字段与 parse_self_user 完全对齐(头像=headurl)
 
-        # ③ 兜底:用"含本人 uid 的响应"里 harvest 出的 3x id / 资料
+        # ④ 兜底:用"含本人 uid 的响应"里 harvest 出的 3x id / 资料
         if not result and hits:
             best = next((h for h in hits
                          if (h["profile"].get("user_id") or "").startswith("3x")), hits[0])

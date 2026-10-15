@@ -196,22 +196,46 @@ def flatten_ks_comments(root_comments: list) -> list:
 
 def parse_self_user(u: dict) -> dict:
     """把快手 visionProfile.userProfile 归一成账号资料 dict(同抖音 parse_self_user 形状)。
-    结构:userProfile = {profile:{user_id,user_name,headurl,...}, ownerCount:{fan,photo,...}}"""
+    结构:userProfile = {profile:{user_id,user_name,headurl,...}, ownerCount:{fan,photo,...}}
+    新版 /rest/v/profile/get 扁平:userName/userHead/eid/userDefineId/fans。"""
     if not isinstance(u, dict):
         return {"nickname": "", "sec_uid": "", "douyin_id": "", "avatar": "",
                 "follower_count": 0, "aweme_count": 0}
     # 兼容直接传 profile 或传整个 userProfile
     profile = _first(u, "profile", default=None) or u
     counts = _first(u, "ownerCount", "counts", default={}) or {}
-    avatar = _first(profile, "headurl", "headerUrl", "headUrl", "avatar", default="") or ""
+    if not isinstance(counts, dict):
+        counts = {}
+    # 扁平计数:fans/follows 可能在 profile 顶层
+    for src, dst in (("fans", "fan"), ("fan", "fan"), ("follows", "follow")):
+        if profile.get(src) is not None and dst not in counts:
+            counts[dst] = profile.get(src)
+    avatar = (_first(profile, "headurl", "headerUrl", "headUrl", "userHead",
+                     "avatar", default="") or "")
     if isinstance(avatar, list):
         avatar = avatar[0] if avatar else ""
+    # sec_uid:优先 3x... 的 eid(web 主页 id),不要用纯数字 userId
+    sec = ""
+    for key in ("eid", "user_id", "userId", "id"):
+        v = profile.get(key)
+        if isinstance(v, str) and v.startswith("3x"):
+            sec = v
+            break
+    if not sec:
+        sec = str(_first(profile, "eid", "user_id", "userId", "id", default="") or "")
+    # 快手号:优先可读 userDefineId / kwaiId,其次数字 userId
+    kid = str(_first(profile, "userDefineId", "kwaiId", default="") or "")
+    if not kid:
+        uid_num = profile.get("userId") or profile.get("user_id") or ""
+        if str(uid_num).isdigit():
+            kid = str(uid_num)
     return {
         "nickname": _first(profile, "user_name", "name", "userName", default="") or "",
-        "sec_uid": str(_first(profile, "user_id", "userId", "id", default="") or ""),
-        "douyin_id": str(_first(profile, "kwaiId", "eid", default="") or ""),  # 快手号
+        "sec_uid": sec,
+        "douyin_id": kid,  # 快手号(面板复用 douyin_id 字段)
         "avatar": avatar,
-        "follower_count": _to_int(_first(counts, "fan", "follower", "fanCount", default=0)),
+        "follower_count": _to_int(_first(counts, "fan", "fans", "follower", "fanCount",
+                                         default=0)),
         # 作品数:快手 ownerCount 用 photo_public(实测),兜底 photo
         "aweme_count": _to_int(_first(counts, "photo_public", "photo", "photoCount",
                                       "work", default=0)),

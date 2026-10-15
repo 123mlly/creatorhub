@@ -61,6 +61,7 @@ from .platforms.youtube import (
     resolve_youtube_channel_ref,
     fetch_youtube_self_profile,
     parse_yt_self_user,
+    yt_profile_conflicts,
 )
 from .platforms.tiktok import (
     resolve_tiktok_user_ref,
@@ -300,6 +301,11 @@ async def _enrich_account_profile(account_id: int, state: str) -> str:
                 p = parse_channels_self_user(u)
             elif platform == "youtube":
                 p = parse_yt_self_user(u)
+                # 半掉线误抓到别人频道时:禁止把多个号覆盖成同一个
+                if yt_profile_conflicts(acc.sec_uid or "", p):
+                    acc.status = "invalid"
+                    s.add(acc); s.commit()
+                    return "invalid"
             elif platform == "tiktok":
                 p = parse_tt_self_user(u)
             else:

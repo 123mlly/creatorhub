@@ -1383,8 +1383,12 @@ async function refreshAccounts() {
     const isXhs = a.platform === "xhs";
     const isKs = a.platform === "kuaishou";
     const isChannels = a.platform === "shipinhao";
-    const idName = isXhs ? "小红书号 " : isKs ? "快手号 " : isChannels ? "视频号 " : "抖音号 ";
-    const secName = isChannels ? "finder_id " : (isXhs || isKs) ? "user_id " : "sec_uid ";
+    const isYt = a.platform === "youtube";
+    const isTt = a.platform === "tiktok";
+    const idName = isXhs ? "小红书号 " : isKs ? "快手号 " : isChannels ? "视频号 "
+      : isYt ? "频道 " : isTt ? "TikTok 号 " : "抖音号 ";
+    const secName = isChannels ? "finder_id " : (isXhs || isKs) ? "user_id "
+      : isYt ? "channel_id " : "sec_uid ";
     const idline = [
       a.douyin_id ? idName + esc(a.douyin_id) : null,
       a.sec_uid ? secName + esc(a.sec_uid).slice(0, 16) + "…" : null,
@@ -1876,7 +1880,17 @@ function populateWatchAccount() {
 async function refreshProfile(id) {
   const btn = evtBtn();
   await withBusy(btn, "拉取中", async () => {
-    try { const r = await api("/api/accounts/" + id + "/refresh-profile", { method: "POST" }); const idLbl = (r.platform || PLATFORM) === "xhs" ? " · 小红书号 " : " · 抖音号 "; toast("资料已更新:" + (r.nickname || "") + (r.douyin_id ? idLbl + r.douyin_id : ""), "ok"); }
+    try {
+      const r = await api("/api/accounts/" + id + "/refresh-profile", { method: "POST" });
+      const plat = r.platform || PLATFORM;
+      const idLbl = plat === "xhs" ? " · 小红书号 "
+        : plat === "kuaishou" ? " · 快手号 "
+        : plat === "shipinhao" ? " · 视频号 "
+        : plat === "youtube" ? " · 频道 "
+        : plat === "tiktok" ? " · TikTok 号 "
+        : " · 抖音号 ";
+      toast("资料已更新:" + (r.nickname || "") + (r.douyin_id ? idLbl + r.douyin_id : ""), "ok");
+    }
     catch (e) { toast("刷新失败:" + e.message, "err"); }
   });
   refreshAccounts();
